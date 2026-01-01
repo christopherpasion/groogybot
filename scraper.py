@@ -2556,6 +2556,11 @@ class Scraper:
                     filtered.append(link)
             
             if filtered:
+                # IMPORTANT: Ranobes returns chapters newest-first (Ch 190, 189, 188...)
+                # We need oldest-first (Ch 1, 2, 3...) for correct chapter selection
+                filtered = list(reversed(filtered))
+                logger.info(f"[Ranobes] Reversed chapter order: oldest first (Ch 1 = {filtered[0].split('/')[-1] if filtered else 'N/A'})")
+                
                 # Cache the links for future use
                 if CACHE_AVAILABLE:
                     cache = get_cache()
