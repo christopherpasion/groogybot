@@ -217,10 +217,17 @@ class Scraper:
                     site_results = future.result()
                     if site_results:
                         results.extend(site_results)
+                        # Debug: log sample results from each site
+                        if site_results and len(site_results) > 0:
+                            sample = site_results[0]
+                            logger.debug(f"[Search] {site_name} sample result: {sample.get('title', 'No title')[:50]} -> {sample.get('url', 'No URL')[:80]}")
                     logger.info(f"[Search] {site_name} search complete, found {len(site_results) if site_results else 0} results.")
                 except Exception as e:
                     site_errors.append(f"{site_name}: {str(e)[:50]}")
                     logger.error(f"{site_name} search error: {e}")
+                    # Debug: add full error details
+                    import traceback
+                    logger.debug(f"{site_name} full error traceback: {traceback.format_exc()[:500]}")
 
         # Clean and deduplicate results
         unique_results = []
@@ -1105,12 +1112,15 @@ class Scraper:
 
     def __init__(self,
                  parallel_workers: int = 3,
-                 use_playwright: bool = True):
+                 use_playwright: bool = None):
         # Use a single persistent User-Agent and HTTP session per Scraper
         # instance so cookies and identity are reused across requests.
         # NOTE: Keep parallel_workers low (3-5) to avoid anti-bot detection
         self.headers = {'User-Agent': random.choice(USER_AGENTS)}
         self.session = requests.Session()
+        
+        # Debug mode (enable rich logging + HTML dumps for diagnostics)
+        self.debug_mode = os.getenv('SCRAPER_DEBUG', '0') == '1'
         
         # Configure proxy from environment variable (format: http://user:pass@host:port)
         # For Webshare rotating proxy, use: http://user-rotate:pass@p.webshare.io:80
@@ -1151,13 +1161,36 @@ class Scraper:
         self.cancel_check = None  # Callback to check if scraping should be cancelled
         self.link_progress_callback = None  # Callback for link collection progress
         self.request_count = 0  # Track requests for rate limiting
-        # Optional browser-based fallback (Playwright/Selenium). Enabled by
-        # default; if the dependencies are missing, it fails gracefully and
-        # normal requests-based scraping is used.
+        # Optional browser-based fallback (Playwright/Selenium). Disabled by default
+        # unless explicitly enabled via argument or USE_PLAYWRIGHT=1.
+        if use_playwright is None:
+            use_playwright = os.getenv('USE_PLAYWRIGHT', '0') == '1'
         self.use_playwright = use_playwright
         self._playwright_scraper = None
         
         logger.info(f"[SCRAPER] Initialized with {parallel_workers} workers, playwright={use_playwright}")
+        if self.debug_mode:
+            logger.info("[SCRAPER] Debug mode enabled (SCRAPER_DEBUG=1)")
+
+    def _debug_dump_html(self, url: str, html: str, tag: str) -> None:
+        """Dump HTML to debug/<domain>/<timestamp>_<tag>.html when debug mode is on."""
+        try:
+            if not self.debug_mode or not html:
+                return
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            domain = parsed.netloc or 'unknown-domain'
+            ts = int(time.time())
+            out_dir = os.path.join(os.getcwd(), 'debug', domain)
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f"{ts}_{tag}.html")
+            # Limit file size to avoid huge dumps
+            content = html if len(html) < 2_000_000 else html[:2_000_000]
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            logger.info(f"[DEBUG] HTML dumped: {out_path}")
+        except Exception as e:
+            logger.debug(f"[DEBUG] Failed to dump HTML: {e}")
 
     def _get_fresh_session(self, rotate_ip: bool = False) -> requests.Session:
         """Create a fresh session with new headers and optionally rotated IP.
@@ -1214,7 +1247,18 @@ class Scraper:
             content_sample = resp.text[:500].lower() if resp.text else ''
             if 'checking your browser' in content_sample:
                 logger.debug(f"[{site_name}] Cloudflare challenge detected")
+                self._debug_dump_html(url, resp.text, f"cloudflare_challenge_{site_name}")
                 return None
+            
+            # Debug: log page structure info
+            if resp.text and self.debug_mode:
+                soup_debug = BeautifulSoup(resp.text, 'html.parser')
+                title_tag = soup_debug.find('title')
+                page_title = title_tag.get_text()[:80] if title_tag else 'No title'
+                main_divs = soup_debug.find_all('div', class_=True)[:8]
+                div_classes = [' '.join(div.get('class', [])) for div in main_divs]
+                logger.debug(f"[{site_name}] Page title: {page_title}")
+                logger.debug(f"[{site_name}] Top div classes: {div_classes}")
             
             return resp
             
@@ -2172,14 +2216,23 @@ class Scraper:
 
             data = json.loads(json_match.group(1))
             chapters_data = data.get('chapters', [])
+            
+            # Debug: log structure of data
+            logger.debug(f"Ranobes JSON data keys: {list(data.keys())}")
+            logger.debug(f"Ranobes chapters count in JSON: {len(chapters_data)}")
 
             links = []
             for chap in chapters_data:
                 link = chap.get('link')
                 if link:
                     links.append(urljoin("https://ranobes.net", link))
+            
+            if links:
+                logger.debug(f"Extracted {len(links)} links from JSON. Sample: {links[0] if links else 'None'}")
+            
             return links
-        except:
+        except Exception as e:
+            logger.debug(f"Ranobes JSON extraction error: {e}")
             return []
 
     def _download_chapter(self, url: str, chapter_num: int, novel_url: str = None) -> Optional[Dict]:
@@ -2245,6 +2298,13 @@ class Scraper:
             page_text = soup.get_text()[:500].lower()
             if 'abnormal activity' in page_text or 'detected abnormal' in page_text or 'dear visitor' in page_text:
                 logger.warning(f"[Chapter] Rate limited at chapter {chapter_num}, waiting 10s...")
+                logger.debug(f"[Chapter] Anti-bot text sample: {page_text[:200]}")
+                # Dump HTML for debugging
+                try:
+                    html_text = resp.text if resp and getattr(resp, 'text', None) else soup.prettify()
+                except Exception:
+                    html_text = soup.prettify()
+                self._debug_dump_html(url, html_text, f"rate_limited_chapter_{chapter_num}")
                 time.sleep(10)  # Wait before retry
                 # Retry once with fresh session
                 resp = self._get_with_retry(url, referer=referer)
@@ -2253,8 +2313,11 @@ class Scraper:
                     page_text = soup.get_text()[:500].lower()
                     if 'abnormal activity' in page_text or 'dear visitor' in page_text:
                         logger.error(f"[Chapter] Still rate limited for chapter {chapter_num}")
+                        # Dump the retried HTML as well
+                        self._debug_dump_html(url, resp.text, f"rate_limited_retry_{chapter_num}")
                         return {'title': f'Chapter {chapter_num}', 'content': '[Rate limited - please try again later]', 'chapter_num': chapter_num}
                 else:
+                    self._debug_dump_html(url, None, f"rate_limited_no_resp_{chapter_num}")
                     return {'title': f'Chapter {chapter_num}', 'content': '[Rate limited - please try again later]', 'chapter_num': chapter_num}
             
             content = ""
@@ -2265,7 +2328,7 @@ class Scraper:
                 for junk in soup.select(
                     "script, style, .ads, .social-buttons, .navigation, .btn-group, .mechanic-buttons, "
                     "#u_o, #u_b, #click_y, #bookmark, .bookmark, .footer, .bottom-menu, .stats, .report, "
-                    "a[href*='chapter-list'], a[href*='next-chapter'], .nav-buttons, .prev-next, .next-chapter, .prev-chapter"
+                    "a[href*='chapter-list'], a[href*='next-chapter'], .nav-buttons, .prev-next, .next-chapter, .prev-chapter, img"
                 ):
                     junk.decompose()
 
@@ -2352,7 +2415,7 @@ class Scraper:
                     '#chapter-content, #chr-content, .chapter-content, .reading-content, '
                     '.chr-c, .chapter__content, .content-inner, article')
                 if content_div:
-                    for junk in content_div.select('script, style, .ads, .navigation'):
+                    for junk in content_div.select('script, style, .ads, .navigation, img'):
                         junk.decompose()
                     content = content_div.get_text(separator='\n\n', strip=True)
 
@@ -2360,6 +2423,12 @@ class Scraper:
                 logger.warning(
                     f"[Chapter] Extracted EMPTY content for chapter {chapter_num} from {url}"
                 )
+                # Dump HTML to investigate selector issues or anti-bot pages
+                try:
+                    html_text = resp.text if resp and getattr(resp, 'text', None) else soup.prettify()
+                except Exception:
+                    html_text = soup.prettify()
+                self._debug_dump_html(url, html_text, f"empty_content_chapter_{chapter_num}")
             else:
                 logger.info(
                     f"[Chapter] Extracted content length for chapter {chapter_num} from {url}: {len(content)} chars"
@@ -2387,6 +2456,12 @@ class Scraper:
                     logger.warning(f"[Chapter] Not caching rate-limited content for chapter {chapter_num}")
             elif content and len(content) <= 200:
                 logger.warning(f"[Chapter] Not caching short content ({len(content)} chars) for chapter {chapter_num} - likely anti-bot")
+                # Dump short content HTML for diagnostics
+                try:
+                    html_text = resp.text if resp and getattr(resp, 'text', None) else soup.prettify()
+                except Exception:
+                    html_text = soup.prettify()
+                self._debug_dump_html(url, html_text, f"short_content_{chapter_num}")
             
             return chapter_data
         except Exception as e:

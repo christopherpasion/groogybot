@@ -9,10 +9,14 @@ import re
 import requests
 import logging
 import tempfile
+import hashlib
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+COVER_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".novel_cache", "covers")
+os.makedirs(COVER_CACHE_DIR, exist_ok=True)
 
 # Try to import user settings for style support
 try:
@@ -30,6 +34,46 @@ except ImportError:
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
+
+
+def _cover_cache_paths(title: str) -> Tuple[str, str]:
+    cleaned = (title or "untitled").strip().lower() or "untitled"
+    key = hashlib.md5(cleaned.encode('utf-8')).hexdigest()
+    data_path = os.path.join(COVER_CACHE_DIR, f"{key}.bin")
+    meta_path = os.path.join(COVER_CACHE_DIR, f"{key}.meta")
+    return data_path, meta_path
+
+
+def _read_cover_cache(title: str) -> Optional[Tuple[bytes, str]]:
+    data_path, meta_path = _cover_cache_paths(title)
+    if not os.path.exists(data_path):
+        return None
+    try:
+        with open(data_path, 'rb') as f:
+            data = f.read()
+        content_type = 'image/jpeg'
+        if os.path.exists(meta_path):
+            with open(meta_path, 'r', encoding='utf-8') as m:
+                stored = m.read().strip()
+                if stored:
+                    content_type = stored
+        logger.info(f"Using cached cover for '{title}'")
+        return data, content_type
+    except Exception as e:
+        logger.debug(f"Failed to read cover cache: {e}")
+        return None
+
+
+def _write_cover_cache(title: str, data: bytes, content_type: str) -> None:
+    data_path, meta_path = _cover_cache_paths(title)
+    try:
+        with open(data_path, 'wb') as f:
+            f.write(data)
+        with open(meta_path, 'w', encoding='utf-8') as m:
+            m.write(content_type or 'image/jpeg')
+        logger.debug(f"Cached cover for '{title}' -> {data_path}")
+    except Exception as e:
+        logger.debug(f"Failed to write cover cache: {e}")
 
 
 def compress_image(image_data: bytes, max_size: tuple = (800, 1200), quality: int = 75) -> Tuple[bytes, str]:
@@ -96,6 +140,9 @@ def fetch_cover_image(title: str, source_url: str = None, metadata: dict = None)
     
     Returns: (image_bytes, media_type) or (None, '') if not found
     """
+    cached = _read_cover_cache(title)
+    if cached:
+        return cached
     
     # 1. Try from metadata first
     if metadata:
@@ -105,8 +152,10 @@ def fetch_cover_image(title: str, source_url: str = None, metadata: dict = None)
                 resp = requests.get(cover_url, timeout=10, headers=HEADERS)
                 if resp.status_code == 200 and len(resp.content) > 1000:
                     content_type = resp.headers.get('content-type', 'image/jpeg')
+                    compressed, media_type = compress_image(resp.content)
                     logger.info(f"Got cover from source: {cover_url}")
-                    return resp.content, content_type
+                    _write_cover_cache(title, compressed, media_type or content_type)
+                    return compressed, media_type or content_type
             except Exception as e:
                 logger.warning(f"Failed to get cover from source: {e}")
     
@@ -131,8 +180,10 @@ def fetch_cover_image(title: str, source_url: str = None, metadata: dict = None)
                         img_resp = requests.get(img_url, timeout=10, headers=HEADERS)
                         if img_resp.status_code == 200 and len(img_resp.content) > 1000:
                             content_type = img_resp.headers.get('content-type', 'image/jpeg')
+                            compressed, media_type = compress_image(img_resp.content)
                             logger.info(f"Got cover from NovelUpdates: {img_url}")
-                            return img_resp.content, content_type
+                            _write_cover_cache(title, compressed, media_type or content_type)
+                            return compressed, media_type or content_type
     except Exception as e:
         logger.warning(f"NovelUpdates cover search failed: {e}")
     
@@ -160,8 +211,10 @@ def fetch_cover_image(title: str, source_url: str = None, metadata: dict = None)
                             img_resp = requests.get(img_url, timeout=10, headers=HEADERS)
                             if img_resp.status_code == 200 and len(img_resp.content) > 1000:
                                 content_type = img_resp.headers.get('content-type', 'image/jpeg')
+                                compressed, media_type = compress_image(img_resp.content)
                                 logger.info(f"Got cover from Google Books (exact match): {img_url}")
-                                return img_resp.content, content_type
+                                _write_cover_cache(title, compressed, media_type or content_type)
+                                return compressed, media_type or content_type
             
             # Second pass: take first result if no exact match (fallback - but skip unrelated books)
             # Don't use fallback to avoid wrong covers like "Human Language" for "Lord of Mysteries"
@@ -184,8 +237,10 @@ def fetch_cover_image(title: str, source_url: str = None, metadata: dict = None)
                     img_resp = requests.get(img_url, timeout=10, headers=HEADERS)
                     if img_resp.status_code == 200 and len(img_resp.content) > 1000:
                         content_type = 'image/jpeg'
+                        compressed, media_type = compress_image(img_resp.content)
                         logger.info(f"Got cover from Open Library: {img_url}")
-                        return img_resp.content, content_type
+                        _write_cover_cache(title, compressed, media_type or content_type)
+                        return compressed, media_type or content_type
     except Exception as e:
         logger.warning(f"Open Library cover search failed: {e}")
     
@@ -194,6 +249,7 @@ def fetch_cover_image(title: str, source_url: str = None, metadata: dict = None)
         placeholder = generate_placeholder_cover(title, metadata)
         if placeholder:
             logger.info(f"Generated placeholder cover for: {title}")
+            _write_cover_cache(title, placeholder, 'image/png')
             return placeholder, 'image/png'
     except Exception as e:
         logger.warning(f"Failed to generate placeholder cover: {e}")

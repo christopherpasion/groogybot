@@ -139,6 +139,26 @@ class PlaywrightScraper:
         self._playwright = None
         self._lock = asyncio.Lock()
         self._webnovel_cookies: List[Dict[str, Any]] = []
+        self._context_blocking_applied = False
+        self._webnovel_blocking_applied = False
+
+    async def _apply_text_only_blocking(self, context: BrowserContext) -> None:
+        """Abort heavy resources to keep bandwidth low (images/media/fonts/styles)."""
+        async def _block(route):
+            try:
+                if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            except Exception:
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+        try:
+            await context.route("**/*", _block)
+        except Exception as e:
+            logger.debug(f"Failed to register blocking route: {e}")
     
     async def _ensure_browser(self) -> BrowserContext:
         async with _pw_semaphore:  # Limit to 1 concurrent browser instance
@@ -163,6 +183,9 @@ class PlaywrightScraper:
                         timezone_id='America/New_York',
                         java_script_enabled=True,
                     )
+                    if not self._context_blocking_applied:
+                        await self._apply_text_only_blocking(self.context)
+                        self._context_blocking_applied = True
                 return self.context
     
     async def _ensure_webnovel_context(self) -> BrowserContext:
@@ -180,6 +203,10 @@ class PlaywrightScraper:
                         timezone_id='America/New_York',
                         java_script_enabled=True,
                     )
+
+                    if not self._webnovel_blocking_applied:
+                        await self._apply_text_only_blocking(self.webnovel_context)
+                        self._webnovel_blocking_applied = True
                     
                     cookies = load_cookies_from_file()
                     webnovel_cookies = [c for c in cookies if 'webnovel' in c.get('domain', '').lower()]
