@@ -2838,15 +2838,11 @@ Use `\\n` for new lines when using /edit command."""
                     count_info = ""
 
                 await message.channel.send(
-                    f"✅ **Selected: {title}**{count_info}\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "**Select Your Preferred Format**\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "**1️⃣  EPUB** - Universal format (recommended)\n"
-                    "  Best for: E-readers, phones, tablets\n\n"
-                    "**2️⃣  PDF** - Print-ready format\n"
-                    "  Best for: Desktop, printing\n\n"
-                    "Reply with `1` or `2`" + HINT_TEXT)
+                    f"✅ **{title}**{count_info}\n\n"
+                    "**Format:**\n"
+                    "1. EPUB (recommended)\n"
+                    "2. PDF\n\n"
+                    "Reply `1` or `2`" + HINT_TEXT)
 
             else:  # input_type == 'title'
                 # Direct novel search (manga disabled)
@@ -2907,10 +2903,10 @@ Use `\\n` for new lines when using /edit command."""
                     state['data']['selected_novel'] = selected_novel
                     state['step'] = 'waiting_for_source_choice'
 
-                    sources_text = f"✅ **Selected: {selected_novel['title']}**\n\nAvailable sources:\n"
+                    sources_text = f"✅ **{selected_novel['title']}**\n\n**Source:**\n"
                     for i, src in enumerate(selected_novel['sources'], 1):
-                        sources_text += f"**{i}.** {src['source']}\n   {src['url']}\n"
-                    sources_text += f"\nReply with a number (1-{len(selected_novel['sources'])})" + HINT_TEXT
+                        sources_text += f"{i}. {src['source']}\n"
+                    sources_text += f"\nReply `1-{len(selected_novel['sources'])}`" + HINT_TEXT
                     await message.channel.send(sources_text)
                 else:
                     await message.channel.send(
@@ -2978,15 +2974,11 @@ Use `\\n` for new lines when using /edit command."""
                             'total_chapters'] = chapter_count  # Save for later use
 
                     await message.channel.send(
-                        f"✅ **Selected: {selected_source['source']}**{count_info}\n"
-                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        "**Select Your Preferred Format**\n"
-                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        "**1️⃣  EPUB** - Universal format (recommended)\n"
-                        "  Best for: E-readers, phones, tablets\n\n"
-                        "**2️⃣  PDF** - Print-ready format\n"
-                        "  Best for: Desktop, printing\n\n"
-                        "Reply with `1` or `2`")
+                        f"✅ **{selected_source['source']}**{count_info}\n\n"
+                        "**Format:**\n"
+                        "1. EPUB (recommended)\n"
+                        "2. PDF\n\n"
+                        "Reply `1` or `2`" + HINT_TEXT)
                 else:
                     await message.channel.send(
                         f"❌ Please reply with a number between 1 and {len(sources)}."
@@ -3008,15 +3000,11 @@ Use `\\n` for new lines when using /edit command."""
                     state['data']['url'] = selected['url']
                     state['step'] = 'waiting_for_format'
                     await message.channel.send(
-                        f"✅ **Selected: {selected['source']}**\n\n"
-                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        "**Select Your Preferred Format**\n"
-                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        "**1️⃣  EPUB** - Universal format (recommended)\n"
-                        "  Best for: E-readers, phones, tablets\n\n"
-                        "**2️⃣  PDF** - Print-ready format\n"
-                        "  Best for: Desktop, printing\n\n"
-                        "Reply with `1` or `2`")
+                        f"✅ **{selected['source']}**\n\n"
+                        "**Format:**\n"
+                        "1. EPUB (recommended)\n"
+                        "2. PDF\n\n"
+                        "Reply `1` or `2`" + HINT_TEXT)
                 else:
                     await message.channel.send(
                         f"❌ Please reply with a number between 1 and {len(search_results)}."
@@ -3143,9 +3131,8 @@ Use `\\n` for new lines when using /edit command."""
             # Handle back/cancel
             if chapter_input == 'back':
                 state['step'] = 'waiting_for_format'
-                await message.channel.send("↩️ Going back.\n\n"
-                                           "**Select Your Preferred Format**\n"
-                                           "**1️⃣  EPUB** | **2️⃣  PDF**" +
+                await message.channel.send("↩️ **Format:**\n"
+                                           "1. EPUB | 2. PDF" +
                                            HINT_TEXT)
                 return
             if chapter_input == 'cancel':
@@ -4214,10 +4201,10 @@ Use `\\n` for new lines when using /edit command."""
                             )
                             del self.user_states[message.author.id]
                             return
-                        sources_text = f"**Found: {novel.get('title', 'Unknown')}**\n\nAvailable sources:\n"
+                        sources_text = f"✅ **{novel.get('title', 'Unknown')}**\n\n**Source:**\n"
                         for i, src in enumerate(sources, 1):
-                            sources_text += f"**{i}.** {src.get('source', 'Unknown')}\n   {src.get('url', '')}\n"
-                        sources_text += f"\nReply with a number (1-{len(sources)})" + HINT_TEXT
+                            sources_text += f"{i}. {src.get('source', 'Unknown')}\n"
+                        sources_text += f"\nReply `1-{len(sources)}`" + HINT_TEXT
                         await message.channel.send(sources_text)
                     else:
                         state['data']['search_results'] = results
@@ -4288,15 +4275,11 @@ Use `\\n` for new lines when using /edit command."""
                     state['step'] = 'waiting_for_manga_format'
 
                     await message.channel.send(
-                        f"**Selected: {selected_manga['title']}**\n\n"
-                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        "**Select Your Preferred Format**\n"
-                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        "**1️⃣  PDF** - All images in one file\n"
-                        "  Best for: Reading, sharing\n\n"
-                        "**2️⃣  ZIP** - Images organized by chapter\n"
-                        "  Best for: Archiving, offline viewing\n\n"
-                        "Reply with `1` or `2`" + HINT_TEXT)
+                        f"✅ **{selected_manga['title']}**\n\n"
+                        "**Format:**\n"
+                        "1. PDF\n"
+                        "2. ZIP\n\n"
+                        "Reply `1` or `2`" + HINT_TEXT)
                 else:
                     await message.channel.send(
                         f"Please reply with a number between 1 and {len(manga_results)}."
@@ -4410,9 +4393,8 @@ Use `\\n` for new lines when using /edit command."""
             # Handle back/cancel
             if user_input == 'back':
                 state['step'] = 'waiting_for_manga_format'
-                await message.channel.send("↩️ Going back.\n\n"
-                                           "**Select Your Preferred Format**\n"
-                                           "**1️⃣  PDF** | **2️⃣  ZIP**" +
+                await message.channel.send("↩️ **Format:**\n"
+                                           "1. PDF | 2. ZIP" +
                                            HINT_TEXT)
                 return
             if user_input == 'cancel':
