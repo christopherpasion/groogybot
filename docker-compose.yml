@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  groogybot:
+    build: .
+    container_name: groogybot
+    restart: unless-stopped
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - DISCORD_SERVER_ID=${DISCORD_SERVER_ID}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - SHRINKME_API_KEY=${SHRINKME_API_KEY:-}
+      - SHRINKEARN_API_KEY=${SHRINKEARN_API_KEY:-}
+    volumes:
+      # Persist cookies between restarts
+      - ./cookies.json:/app/cookies.json
+    # Memory limit (optional, adjust as needed)
+    mem_limit: 2g
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

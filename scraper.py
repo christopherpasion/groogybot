@@ -1,0 +1,2718 @@
+import requests
+from bs4 import BeautifulSoup
+import re
+from urllib.parse import urljoin, urlparse, quote_plus
+import time
+import logging
+import random
+
+import asyncio
+from typing import List, Optional, Dict, Tuple, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue, Empty
+from threading import Thread, Event
+
+# Import cache system for reducing requests
+try:
+    from cache import get_cache, NovelCache
+    CACHE_AVAILABLE = True
+except ImportError:
+    CACHE_AVAILABLE = False
+    def get_cache():
+        return None
+
+
+# Patching async_scraper import for Replit environment
+async def run_async_scrape(*args, **kwargs):
+    logger.warning("run_async_scrape is a placeholder")
+    return []
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+PROTECTED_SITES = [
+    'webnovel.com',
+    'qidian.com',  # Cloudflare protected
+    'novelfire.net',  # Blocks aggressively
+    # Note: Ranobes uses embedded JS data in script tags, not Playwright
+]
+
+
+def is_protected_site(url: str) -> bool:
+    """Check if URL is from a Cloudflare-protected site.
+
+    Uses proper domain matching to avoid false positives like
+    'freewebnovel.com' matching 'webnovel.com'.
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url.lower())
+        domain = parsed.netloc
+        # Remove 'www.' prefix for comparison
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        # Check if domain matches or ends with protected site
+        for site in PROTECTED_SITES:
+            if domain == site or domain.endswith('.' + site):
+                return True
+        return False
+    except:
+        return False
+
+
+# Rotating User Agents for anti-detection (updated 2025)
+USER_AGENTS = [
+    # Chrome on Windows (most common)
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+    # Chrome on Mac
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    # Safari on Mac
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+    # Firefox
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.2; rv:133.0) Gecko/20100101 Firefox/133.0',
+    # Edge
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',
+    # Mobile Chrome
+    'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/131.0.6778.73 Mobile/15E148 Safari/604.1',
+    # Mobile Safari
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (iPad; CPU OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+]
+
+# Alternative domain mirrors for sites that get blocked
+SITE_MIRRORS = {
+    'novelbin': [
+        'novelbin.me', 'novelbin.com', 'novelbin.cfd', 'novelbin.net',
+        'novelbin.org', 'novelbin.cc', 'novelbin.tv'
+    ],
+    'lightnovelworld': [
+        'lightnovelworld.com', 'lightnovelworld.co', 'lnworld.com'
+    ],
+    'freewebnovel': [
+        'freewebnovel.com', 'freewebnovel.me', 'freewebnovel.net'
+    ],
+    'novelfire': [
+        'novelfire.net', 'novelfire.com', 'novelfire.org'
+    ],
+}
+
+
+class Scraper:
+    def search_all_sites_with_choices(self, query: str, use_cache: bool = True) -> List[Dict[str, str]]:
+        """
+        Search all supported novel sites for the given query and return a list of results with site/source info.
+        Each result is a dict: {'title': ..., 'url': ..., 'source': ...}
+        Now runs all site searches in parallel for speed. If no results, fallback to DuckDuckGo search.
+        
+        Args:
+            query: Search query
+            use_cache: If True, check cache first and cache new results (reduces IP blocks)
+        """
+        import requests
+        from bs4 import BeautifulSoup
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Check cache first
+        if use_cache and CACHE_AVAILABLE:
+            cache = get_cache()
+            cached_results = cache.get_search_results(query)
+            if cached_results:
+                logger.info(f"[Search] Using cached results for '{query}' ({len(cached_results)} results)")
+                return cached_results
+
+        # Only include working sites (tested Dec 2025)
+        # Dead/blocked sites removed: BoxNovel, LightNovelCave, EmpireNovel, WTR-Lab, 
+        # FullNovels, NiceNovel, BedNovel, AllNovelBook, EnglishNovelsFree, ReadNovelFull
+        site_funcs = [
+            ('NovelBin', lambda: self.search_novelbin_multiple(query)),
+            ('RoyalRoad', lambda: self.search_royalroad_multiple(query)),
+            ('Ranobes', lambda: self._search_ranobes(query)),
+            ('NovelFire', lambda: self._search_novelfire(query)),
+            ('FreeWebNovel', lambda: self._search_freewebnovel(query)),
+            ('CreativeNovels', lambda: self._search_creativenovels(query)),
+            ('LightNovelWorld', lambda: self._search_lightnovelworld(query)),
+            ('LNMTL', lambda: self._search_lnmtl(query)),
+            ('ReaderNovel', lambda: self._search_readernovel(query)),
+            ('NovelBuddy', lambda: self._search_novelbuddy(query)),
+            ('LibRead', lambda: self._search_libread(query)),
+            ('YongLibrary', lambda: self._search_yonglibrary(query)),
+            ('DuckDuckGo', lambda: self._search_duckduckgo_novels(query)),
+        ]
+
+        results = []
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_site = {executor.submit(func): name for name, func in site_funcs}
+            for future in as_completed(future_to_site):
+                site_name = future_to_site[future]
+                try:
+                    site_results = future.result()
+                    if site_results:
+                        results.extend(site_results)
+                    logger.info(f"[Search] {site_name} search complete, found {len(site_results) if site_results else 0} results.")
+                except Exception as e:
+                    logger.error(f"{site_name} search error: {e}")
+
+        # Deduplicate by URL
+        seen = set()
+        unique_results = []
+        for r in results:
+            if r['url'] not in seen:
+                unique_results.append(r)
+                seen.add(r['url'])
+
+        # Cache results for future use (reduces requests and IP blocking)
+        if use_cache and CACHE_AVAILABLE and unique_results:
+            cache = get_cache()
+            cache.set_search_results(query, unique_results)
+
+        logger.info(f"[Search] All site searches complete. Returning {len(unique_results)} unique results.")
+        return unique_results
+
+    def _search_duckduckgo_novels(self, query: str) -> List[Dict[str, str]]:
+        """
+        Search DuckDuckGo for the query and return a list of likely novel links.
+        Only returns results from known novel sites.
+        Uses the HTML version of DuckDuckGo for reliable scraping.
+        """
+        try:
+            from urllib.parse import urljoin, urlparse, parse_qs, unquote
+            
+            # Use the lite/html version for better scraping
+            search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query + ' novel read online')}"
+            
+            resp = self._search_fetch(search_url, 'DuckDuckGo')
+            if not resp:
+                # Try alternative URL
+                search_url = f"https://duckduckgo.com/html/?q={quote_plus(query + ' novel')}"
+                resp = self._search_fetch(search_url, 'DuckDuckGo')
+            
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            results = []
+            
+            # DuckDuckGo results are in .result__a or .result-link
+            links = soup.select('.result__a, .result-link a, a.result__url')
+            if not links:
+                links = soup.select('a[href*="uddg="]')
+            
+            for a in links:
+                href = a.get('href')
+                title = a.get_text(strip=True)
+                if not href or not title:
+                    continue
+
+                # Normalize DuckDuckGo redirect links to their real target URL
+                url = href
+                if href.startswith('/'):
+                    url = urljoin('https://duckduckgo.com', href)
+
+                parsed = urlparse(url)
+                if 'duckduckgo.com' in parsed.netloc:
+                    qs = parse_qs(parsed.query)
+                    target = qs.get('uddg', [None])[0]
+                    if target:
+                        url = unquote(target)
+
+                # Only accept links from known novel sites
+                known_sites = [
+                    'novelbin', 'royalroad', 'novelfire', 'freewebnovel', 'creativenovels',
+                    'boxnovel', 'lightnovelworld', 'lnmtl', 'readernovel', 'novelbuddy',
+                    'lightnovelcave', 'libread', 'wtr-lab', 'fullnovels',
+                    'nicenovel', 'bednovel', 'allnovelbook', 'yonglibrary', 'englishnovelsfree',
+                    'ranobes', 'readnovelfull', 'novellive', 'webnovel', 'scribblehub'
+                ]
+                if any(site in url.lower() for site in known_sites):
+                    # Clean up title
+                    title = re.sub(r'\s*[-|]\s*(Read|Novel|Online|Free).*', '', title, flags=re.I)
+                    if title and not any(r['url'] == url for r in results):
+                        results.append({'title': title.strip(), 'url': url, 'source': 'DuckDuckGo'})
+                        
+                if len(results) >= 15:
+                    break
+                    
+            logger.info(f"[DuckDuckGo] Found {len(results)} novel results for '{query}'")
+            return results
+        except Exception as e:
+            logger.error(f"DuckDuckGo search error: {e}")
+            return []
+
+    # --- Helper methods for each site for parallel search ---
+    def _search_ranobes(self, query):
+        """Search Ranobes for novels by title.
+        
+        Ranobes uses a specific search page structure. The results are in
+        .short-cont or .shortstory blocks with links to /novels/ID-slug.html
+        
+        Only uses ranobes.net (English site). ranobes.com is Russian-only.
+        Uses cloudscraper to bypass JavaScript challenges when available.
+        """
+        try:
+            # Only use ranobes.net - the English site
+            # NOTE: ranobes.com is the Russian version with Russian translations, not English!
+            search_configs = [
+                # (base_url, search_path, novel_url_pattern)
+                ('https://ranobes.net', f'/search/{quote_plus(query)}/', r'/novels/\d+.*\.html'),
+                ('https://ranobes.net', f'/?do=search&subaction=search&story={quote_plus(query)}', r'/novels/\d+.*\.html'),
+            ]
+            
+            # Try cloudscraper first if available (better at bypassing JS challenges)
+            try:
+                import cloudscraper
+                scraper = cloudscraper.create_scraper()
+                for base_url, search_path, url_pattern in search_configs:
+                    search_url = base_url + search_path
+                    try:
+                        resp = scraper.get(search_url, timeout=15)
+                        if resp.status_code == 200 and 'just a moment' not in resp.text.lower()[:500]:
+                            soup = BeautifulSoup(resp.content, 'html.parser')
+                            results = self._parse_ranobes_results(soup, query, base_url, url_pattern)
+                            if results:
+                                return results
+                        elif 'just a moment' in resp.text.lower()[:500]:
+                            logger.warning(f"[Ranobes] Temporarily blocked by Cloudflare. Your IP may be rate-limited. Try again later or use a VPN.")
+                    except Exception as e:
+                        logger.debug(f"[Ranobes] cloudscraper failed for {base_url}: {e}")
+            except ImportError:
+                pass  # cloudscraper not installed
+            
+            # Fallback to regular session
+            blocked = False
+            for base_url, search_path, url_pattern in search_configs:
+                search_url = base_url + search_path
+                resp = self._search_fetch(search_url, 'Ranobes')
+                if not resp:
+                    continue
+                
+                # Check if blocked by Cloudflare
+                if 'just a moment' in resp.text.lower()[:500]:
+                    blocked = True
+                    continue
+                    
+                soup = BeautifulSoup(resp.content, 'html.parser')
+                results = self._parse_ranobes_results(soup, query, base_url, url_pattern)
+                if results:
+                    return results
+            
+            if blocked:
+                logger.warning("[Ranobes] Temporarily blocked by Cloudflare. Your IP may be rate-limited. Try again later or use a VPN.")
+                    
+            return []
+        except Exception as e:
+            logger.error(f"Ranobes search error: {e}")
+            return []
+    
+    def _parse_ranobes_results(self, soup, query, base_url='https://ranobes.net', url_pattern=r'/novels/\d+.*\.html'):
+        """Parse Ranobes search results from soup."""
+        results = []
+        
+        # Ranobes search results are in .short-cont or article.short blocks
+        # ranobes.com uses /ranobe/ while ranobes.net uses /novels/
+        novel_path = '/ranobe/' if 'ranobes.com' in base_url else '/novels/'
+        
+        items = soup.select('.short-cont .short-title a, article.short .short-title a')
+        if not items:
+            items = soup.select('.shortstory .short-title a, .shortstory h2 a')
+        if not items:
+            items = soup.select(f'a[href*="{novel_path}"][href$=".html"]')
+        if not items:
+            # Try finding any links to novel pages
+            items = soup.find_all('a', href=lambda h: h and novel_path in h and '.html' in h)
+
+        for a in items[:10]:
+            href = a.get('href', '')
+            if not href:
+                continue
+            # Must be a novel page URL with ID
+            if not re.search(url_pattern, href):
+                continue
+            if not href.startswith('http'):
+                href = urljoin(base_url, href)
+            title = a.get('title') or a.get_text(strip=True)
+            # Clean up title
+            title = re.sub(r'\s*-\s*Ranobes.*', '', title, flags=re.I)
+            if title and href and not any(r['url'] == href for r in results):
+                results.append({'title': title, 'url': href, 'source': 'Ranobes'})
+        
+        if results:
+            logger.info(f"[Ranobes] Found {len(results)} results for '{query}'")
+        return results
+
+    def _search_novelfire(self, query):
+        """Search NovelFire."""
+        try:
+            search_url = f"https://novelfire.net/search?keyword={quote_plus(query)}"
+            resp = self.session.get(search_url, headers=self._get_random_headers(), timeout=15)
+            
+            if resp.status_code != 200:
+                logger.debug(f"[NovelFire] HTTP {resp.status_code}")
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # NovelFire uses a[href*="/book/"] for results
+            items = soup.select('a[href*="/book/"]')
+                
+            results = []
+            seen_urls = set()
+            for item in items:
+                href = item.get('href', '')
+                if not href or '/chapters' in href or href in seen_urls:
+                    continue
+                if not href.startswith('http'):
+                    href = 'https://novelfire.net' + href
+                title = item.get('title') or item.get_text(strip=True)
+                # Clean up title - remove rank info
+                if title:
+                    title = title.split('Rank')[0].strip()
+                if title and len(title) > 2:
+                    seen_urls.add(href)
+                    results.append({'title': title, 'url': href, 'source': 'NovelFire'})
+                if len(results) >= 5:
+                    break
+            
+            logger.info(f"[NovelFire] Found {len(results)} results for '{query}'")
+            return results
+        except Exception as e:
+            logger.error(f"NovelFire search error: {e}")
+            return []
+
+    def _search_freewebnovel(self, query):
+        """Search FreeWebNovel with correct URL and selectors."""
+        try:
+            # freewebnovel.com uses searchkey parameter
+            search_url = f"https://freewebnovel.com/search?searchkey={quote_plus(query)}"
+            resp = self.session.get(search_url, headers=self._get_random_headers(), timeout=15)
+            
+            if resp.status_code != 200:
+                logger.debug(f"[FreeWebNovel] HTTP {resp.status_code}")
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # FreeWebNovel uses .tit a for novel links
+            items = soup.select('.tit a')
+            if not items:
+                items = soup.select('.book-img-text li a, .novel-item a')
+                
+            results = []
+            seen_urls = set()
+            for item in items:
+                href = item.get('href', '')
+                if not href or href in seen_urls:
+                    continue
+                if not href.startswith('http'):
+                    href = 'https://freewebnovel.com' + href
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    seen_urls.add(href)
+                    results.append({'title': title, 'url': href, 'source': 'FreeWebNovel'})
+                if len(results) >= 5:
+                    break
+            
+            logger.info(f"[FreeWebNovel] Found {len(results)} results for '{query}'")
+            return results
+        except Exception as e:
+            logger.error(f"FreeWebNovel search error: {e}")
+            return []
+
+    def _search_creativenovels(self, query):
+        """Search CreativeNovels with proper selectors."""
+        try:
+            search_url = f"https://creativenovels.com/?s={quote_plus(query)}"
+            resp = self._search_fetch(search_url, 'CreativeNovels')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # CreativeNovels uses links with /novel/ in the URL
+            items = soup.select('a[href*="creativenovels.com/novel/"]')
+            if not items:
+                items = soup.select('.post-title a, article.post h2 a, .entry-title a')
+            
+            results = []
+            seen_urls = set()
+            for item in items:
+                href = item.get('href', '')
+                if not href or '/novel/' not in href:
+                    continue
+                if href in seen_urls:
+                    continue
+                seen_urls.add(href)
+                if not href.startswith('http'):
+                    href = 'https://creativenovels.com' + href
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'CreativeNovels'})
+                if len(results) >= 5:
+                    break
+            return results
+        except Exception as e:
+            logger.error(f"CreativeNovels search error: {e}")
+            return []
+
+    def _search_boxnovel(self, query):
+        """Search BoxNovel with proper selectors."""
+        try:
+            search_url = f"https://boxnovel.com/?s={quote_plus(query)}&post_type=wp-manga"
+            resp = self._search_fetch(search_url, 'BoxNovel')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # BoxNovel uses WordPress manga theme
+            items = soup.select('.post-title h3 a, .post-title h4 a, .c-tabs-item__content .post-title a')
+            if not items:
+                items = soup.select('a[href*="/novel/"]')
+                
+            results = []
+            for item in items[:5]:
+                href = item.get('href', '')
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'BoxNovel'})
+            return results
+        except Exception as e:
+            logger.error(f"BoxNovel search error: {e}")
+            return []
+
+    def _search_lightnovelworld(self, query):
+        """Search LightNovelWorld with Cloudflare bypass."""
+        try:
+            # Try multiple domains - lightnovelworld.org works best
+            domains = ['lightnovelworld.org', 'www.lightnovelworld.com', 'lightnovelworld.co', 'lnworld.com']
+            
+            for domain in domains:
+                search_url = f"https://{domain}/search?keyword={quote_plus(query)}"
+                resp = self._search_fetch(search_url, 'LightNovelWorld')
+                
+                if not resp:
+                    continue
+                    
+                soup = BeautifulSoup(resp.content, 'html.parser')
+                
+                # LightNovelWorld uses h3.card-title for novel names
+                # The link is in a parent div container
+                results = []
+                seen_urls = set()
+                
+                for card in soup.select('h3.card-title'):
+                    title = card.get_text(strip=True)
+                    if not title or title in ['Navigation', 'Actions', 'Settings']:
+                        continue
+                    
+                    # Find the link in parent divs
+                    parent = card.parent
+                    link = None
+                    for _ in range(5):
+                        if parent is None:
+                            break
+                        link = parent.find('a', href=lambda h: h and '/novel/' in h)
+                        if link:
+                            break
+                        parent = parent.parent
+                    
+                    if not link:
+                        continue
+                        
+                    href = link.get('href', '')
+                    if not href or href in seen_urls:
+                        continue
+                    seen_urls.add(href)
+                    
+                    if not href.startswith('http'):
+                        href = f'https://{domain}' + href
+                    
+                    results.append({'title': title, 'url': href, 'source': 'LightNovelWorld'})
+                    if len(results) >= 5:
+                        break
+                
+                if results:
+                    logger.info(f"[LightNovelWorld] Found {len(results)} results for '{query}'")
+                    return results
+                    
+            return []
+        except Exception as e:
+            logger.error(f"LightNovelWorld search error: {e}")
+            return []
+
+    def _search_lnmtl(self, query):
+        """Search LNMTL (Machine Translation) with proper selectors."""
+        try:
+            # LNMTL uses /novel?q= for search
+            search_url = f"https://lnmtl.com/novel?q={quote_plus(query)}"
+            resp = self.session.get(search_url, headers=self._get_random_headers(), timeout=15)
+            
+            if resp.status_code != 200:
+                logger.debug(f"[LNMTL] HTTP {resp.status_code}")
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # LNMTL uses .media-title a for novel links
+            items = soup.select('.media-title a')
+            if not items:
+                items = soup.select('a[href*="/novel/"]')
+                
+            results = []
+            seen = set()
+            for item in items:
+                href = item.get('href', '')
+                if href in seen or not href:
+                    continue
+                if not href.startswith('http'):
+                    href = 'https://lnmtl.com' + href
+                title = item.get_text(strip=True)
+                if title and href and '/novel/' in href:
+                    seen.add(href)
+                    results.append({'title': title, 'url': href, 'source': 'LNMTL'})
+                if len(results) >= 5:
+                    break
+                    
+            logger.info(f"[LNMTL] Found {len(results)} results for '{query}'")
+            return results
+        except Exception as e:
+            logger.error(f"LNMTL search error: {e}")
+            return []
+
+    def _search_readernovel(self, query):
+        """Search ReaderNovel with proper selectors."""
+        try:
+            # readernovel.net works, readernovel.com is broken
+            search_url = f"https://readernovel.net/?s={quote_plus(query)}&post_type=wp-manga"
+            resp = self._search_fetch(search_url, 'ReaderNovel')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # WordPress manga theme
+            items = soup.select('.post-title h3 a, .post-title h4 a, .c-tabs-item__content a')
+            if not items:
+                items = soup.select('a[href*="/novel/"], a[href*="/manga/"]')
+                
+            results = []
+            for item in items[:5]:
+                href = item.get('href', '')
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'ReaderNovel'})
+            return results
+        except Exception as e:
+            logger.error(f"ReaderNovel search error: {e}")
+            return []
+
+    def _search_novelbuddy(self, query):
+        """Search NovelBuddy with proper selectors."""
+        try:
+            # NovelBuddy uses /search endpoint
+            search_url = f"https://novelbuddy.com/search?q={quote_plus(query)}"
+            resp = self.session.get(search_url, headers=self._get_random_headers(), timeout=15)
+            
+            if resp.status_code != 200:
+                logger.debug(f"[NovelBuddy] HTTP {resp.status_code}")
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # NovelBuddy uses book-item or book-detailed-item
+            items = soup.select('.book-item a, .book-detailed-item a')
+            if not items:
+                items = soup.select('a[href*="/novel/"]')
+                
+            results = []
+            seen = set()
+            for item in items:
+                href = item.get('href', '')
+                if not href or href in seen:
+                    continue
+                if not href.startswith('http'):
+                    href = 'https://novelbuddy.com' + href
+                # Only include novel pages, not chapter pages
+                if '/chapter-' in href:
+                    continue
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href and '/novel/' in href:
+                    seen.add(href)
+                    results.append({'title': title, 'url': href, 'source': 'NovelBuddy'})
+                if len(results) >= 5:
+                    break
+                    
+            logger.info(f"[NovelBuddy] Found {len(results)} results for '{query}'")
+            return results
+        except Exception as e:
+            logger.error(f"NovelBuddy search error: {e}")
+            return []
+
+    def _search_lightnovelcave(self, query):
+        """Search LightNovelCave with proper selectors."""
+        try:
+            # Try multiple domains
+            domains = ['lightnovelcave.com', 'lightnovelcave.co', 'lncave.com']
+            
+            for domain in domains:
+                search_url = f"https://{domain}/search?keyword={quote_plus(query)}"
+                resp = self._search_fetch(search_url, 'LightNovelCave')
+                if not resp:
+                    continue
+                    
+                soup = BeautifulSoup(resp.content, 'html.parser')
+                
+                # Similar to LightNovelWorld
+                items = soup.select('.novel-item .novel-title a, .novel-list .novel-title a')
+                if not items:
+                    items = soup.select('a[href*="/novel/"]')
+                    
+                results = []
+                for item in items[:5]:
+                    href = item.get('href', '')
+                    if href and not href.startswith('http'):
+                        href = f'https://{domain}' + href
+                    title = item.get('title') or item.get_text(strip=True)
+                    if title and href:
+                        results.append({'title': title, 'url': href, 'source': 'LightNovelCave'})
+                        
+                if results:
+                    return results
+                    
+            return []
+        except Exception as e:
+            logger.error(f"LightNovelCave search error: {e}")
+            return []
+
+    def _search_libread(self, query):
+        """Search LibRead with proper selectors."""
+        try:
+            # libread.com works, libread.org is broken
+            search_url = f"https://libread.com/?s={quote_plus(query)}"
+            resp = self._search_fetch(search_url, 'LibRead')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # LibRead uses links with /libread/ in href
+            items = soup.select('a[href*="/libread/"]')
+            if not items:
+                items = soup.select('.book-list .bookname a, .novel-list .novel-title a')
+                
+            results = []
+            seen_urls = set()
+            for item in items:
+                href = item.get('href', '')
+                if not href or '/libread/' not in href:
+                    continue
+                # Skip chapter links, only get novel pages
+                if '/chapter-' in href:
+                    continue
+                if href in seen_urls:
+                    continue
+                seen_urls.add(href)
+                if not href.startswith('http'):
+                    href = 'https://libread.com' + href
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'LibRead'})
+                if len(results) >= 5:
+                    break
+                    
+            return results
+        except Exception as e:
+            logger.error(f"LibRead search error: {e}")
+            return []
+
+    def _search_empirenovel(self, query):
+        """Search EmpireNovel with proper selectors."""
+        try:
+            search_url = f"https://empirenovel.com/?s={quote_plus(query)}&post_type=wp-manga"
+            resp = self._search_fetch(search_url, 'EmpireNovel')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # WordPress manga theme
+            items = soup.select('.post-title h3 a, .post-title h4 a')
+            if not items:
+                items = soup.select('a[href*="/manga/"], a[href*="/novel/"]')
+                
+            results = []
+            for item in items[:5]:
+                href = item.get('href', '')
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'EmpireNovel'})
+            return results
+        except Exception as e:
+            logger.error(f"EmpireNovel search error: {e}")
+            return []
+
+    def _search_wtrlab(self, query):
+        """Search WTR-Lab with proper selectors."""
+        try:
+            search_url = f"https://wtr-lab.com/en/search?q={quote_plus(query)}"
+            resp = self._search_fetch(search_url, 'WTR-Lab')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # WTR-Lab uses novel cards
+            items = soup.select('.novel-item a, .search-result a[href*="/serie-"]')
+            if not items:
+                items = soup.select('a[href*="/serie-"], a[href*="/novel/"]')
+                
+            results = []
+            for item in items[:5]:
+                href = item.get('href', '')
+                if href and not href.startswith('http'):
+                    href = 'https://wtr-lab.com' + href
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href and len(title) > 2:
+                    results.append({'title': title, 'url': href, 'source': 'WTR-Lab'})
+            return results
+        except Exception as e:
+            logger.error(f"WTR-Lab search error: {e}")
+            return []
+
+    def _search_fullnovels(self, query):
+        """Search FullNovels with proper selectors."""
+        try:
+            search_url = f"https://fullnovels.com/?s={quote_plus(query)}&post_type=wp-manga"
+            resp = self._search_fetch(search_url, 'FullNovels')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # WordPress manga theme
+            items = soup.select('.post-title h3 a, .post-title h4 a')
+            if not items:
+                items = soup.select('a[href*="/manga/"], a[href*="/novel/"]')
+                
+            results = []
+            for item in items[:5]:
+                href = item.get('href', '')
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'FullNovels'})
+            return results
+        except Exception as e:
+            logger.error(f"FullNovels search error: {e}")
+            return []
+
+    def _search_nicenovel(self, query):
+        """Search NiceNovel with proper selectors."""
+        try:
+            search_url = f"https://nicenovel.net/search?keyword={quote_plus(query)}"
+            resp = self._search_fetch(search_url, 'NiceNovel')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            items = soup.select('.novel-item a, .book-item a, .search-item a')
+            if not items:
+                items = soup.select('a[href*="/novel/"]')
+                
+            results = []
+            for item in items[:5]:
+                href = item.get('href', '')
+                if href and not href.startswith('http'):
+                    href = 'https://nicenovel.net' + href
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'NiceNovel'})
+            return results
+        except Exception as e:
+            logger.error(f"NiceNovel search error: {e}")
+            return []
+
+    def _search_bednovel(self, query):
+        """Search BedNovel with proper selectors."""
+        try:
+            search_url = f"https://bednovel.com/?s={quote_plus(query)}&post_type=wp-manga"
+            resp = self._search_fetch(search_url, 'BedNovel')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # WordPress manga theme
+            items = soup.select('.post-title h3 a, .post-title h4 a')
+            if not items:
+                items = soup.select('a[href*="/manga/"], a[href*="/novel/"]')
+                
+            results = []
+            for item in items[:5]:
+                href = item.get('href', '')
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'BedNovel'})
+            return results
+        except Exception as e:
+            logger.error(f"BedNovel search error: {e}")
+            return []
+
+    def _search_allnovelbook(self, query):
+        """Search AllNovelBook with proper selectors."""
+        try:
+            search_url = f"https://allnovelbook.com/?s={quote_plus(query)}&post_type=wp-manga"
+            resp = self._search_fetch(search_url, 'AllNovelBook')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # WordPress manga theme
+            items = soup.select('.post-title h3 a, .post-title h4 a')
+            if not items:
+                items = soup.select('a[href*="/manga/"], a[href*="/novel/"]')
+                
+            results = []
+            for item in items[:5]:
+                href = item.get('href', '')
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'AllNovelBook'})
+            return results
+        except Exception as e:
+            logger.error(f"AllNovelBook search error: {e}")
+            return []
+
+    def _search_yonglibrary(self, query):
+        """Search YongLibrary with proper selectors."""
+        try:
+            search_url = f"https://yonglibrary.com/?s={quote_plus(query)}&post_type=wp-manga"
+            resp = self._search_fetch(search_url, 'YongLibrary')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # WordPress manga theme
+            items = soup.select('.post-title h3 a, .post-title h4 a')
+            if not items:
+                items = soup.select('a[href*="/manga/"], a[href*="/novel/"]')
+                
+            results = []
+            for item in items[:5]:
+                href = item.get('href', '')
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'YongLibrary'})
+            return results
+        except Exception as e:
+            logger.error(f"YongLibrary search error: {e}")
+            return []
+
+    def _search_englishnovelsfree(self, query):
+        """Search EnglishNovelsFree with proper selectors."""
+        try:
+            search_url = f"https://englishnovelsfree.com/?s={quote_plus(query)}&post_type=wp-manga"
+            resp = self._search_fetch(search_url, 'EnglishNovelsFree')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # WordPress manga theme
+            items = soup.select('.post-title h3 a, .post-title h4 a')
+            if not items:
+                items = soup.select('a[href*="/manga/"], a[href*="/novel/"]')
+                
+            results = []
+            for item in items[:5]:
+                href = item.get('href', '')
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'EnglishNovelsFree'})
+            return results
+        except Exception as e:
+            logger.error(f"EnglishNovelsFree search error: {e}")
+            return []
+
+    def _search_readnovelfull(self, query):
+        """Search ReadNovelFull with proper selectors."""
+        try:
+            # readnovelfull.net works, .com and .me are broken
+            search_url = f"https://readnovelfull.net/search?keyword={quote_plus(query)}"
+            resp = self._search_fetch(search_url, 'ReadNovelFull')
+            if not resp:
+                return []
+                
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # ReadNovelFull uses novel-title class
+            items = soup.select('.novel-title a, .book-name a, h3.title a')
+            if not items:
+                items = soup.select('a[href*="/novel-book/"], a[href*="/novel/"]')
+                
+            results = []
+            for item in items[:5]:
+                href = item.get('href', '')
+                if href and not href.startswith('http'):
+                    href = 'https://readnovelfull.net' + href
+                title = item.get('title') or item.get_text(strip=True)
+                if title and href:
+                    results.append({'title': title, 'url': href, 'source': 'ReadNovelFull'})
+            return results
+        except Exception as e:
+            logger.error(f"ReadNovelFull search error: {e}")
+            return []
+
+    # Free sites (no paywalls)
+    FREE_SITES = [
+        'novelbin', 'novelfire', 'royalroad', 'creativenovels', 'lnmtl',
+        'readernovel', 'boxnovel', 'freewebnovel', 'lightnovelworld',
+        'readnovelfull', 'novellive', 'wtr-lab', 'ranobes'
+    ]
+    # Paid sites (have paywalls/premium chapters)
+    PAID_SITES = ['webnovel', 'qidian', 'wuxiaworld']
+
+    def __init__(self,
+                 parallel_workers: int = 10,
+                 use_playwright: bool = True):
+        # Use a single persistent User-Agent and HTTP session per Scraper
+        # instance so cookies and identity are reused across requests.
+        self.headers = {'User-Agent': random.choice(USER_AGENTS)}
+        self.session = requests.Session()
+        
+        # Configure session for better anti-detection
+        self.session.headers.update(self._get_random_headers())
+        
+        # Pre-set cookies for sites that require them (e.g., Ranobes browser check)
+        self.session.cookies.set('browser_check', '1', domain='ranobes.net')
+        
+        # Set up connection pooling for better performance
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        # Configure automatic retries for connection issues
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "HEAD", "OPTIONS"]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        
+        self.throttle_delay = 0  # No delay - maximum speed
+        self.max_retries = 4  # Increased retries for Cloudflare bypass attempts
+        self.parallel_workers = parallel_workers  # Use tier-based worker count from bot
+        self.progress_callback = None  # Callback for progress updates
+        self.cancel_check = None  # Callback to check if scraping should be cancelled
+        self.link_progress_callback = None  # Callback for link collection progress
+        self.request_count = 0  # Track requests for rate limiting
+        # Optional browser-based fallback (Playwright/Selenium). Enabled by
+        # default; if the dependencies are missing, it fails gracefully and
+        # normal requests-based scraping is used.
+        self.use_playwright = use_playwright
+        self._playwright_scraper = None
+        
+        logger.info(f"[SCRAPER] Initialized with {parallel_workers} workers, playwright={use_playwright}")
+
+    def _search_fetch(self, url: str, site_name: str, timeout: int = 10) -> Optional[requests.Response]:
+        """Fetch a URL for search purposes with proper headers and logging.
+        
+        Uses the session for cookie persistence and includes Cloudflare bypass headers.
+        Returns None if the request fails or returns a Cloudflare challenge.
+        """
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            domain = parsed.netloc
+            
+            headers = self._get_cloudflare_bypass_headers(url)
+            resp = self.session.get(url, headers=headers, timeout=timeout)
+            
+            if resp.status_code == 403:
+                logger.debug(f"[{site_name}] 403 Forbidden - likely Cloudflare blocked")
+                return None
+            elif resp.status_code == 503:
+                logger.debug(f"[{site_name}] 503 - Cloudflare challenge or maintenance")
+                return None
+            elif resp.status_code != 200:
+                logger.debug(f"[{site_name}] HTTP {resp.status_code}")
+                return None
+            
+            # Check for Cloudflare challenge page
+            content_sample = resp.text[:500].lower() if resp.text else ''
+            if 'checking your browser' in content_sample:
+                logger.debug(f"[{site_name}] Cloudflare challenge detected")
+                return None
+            
+            return resp
+            
+        except requests.exceptions.Timeout:
+            logger.debug(f"[{site_name}] Timeout")
+            return None
+        except Exception as e:
+            logger.debug(f"[{site_name}] Error: {type(e).__name__}")
+            return None
+
+    def _is_paid_site(self, url: str) -> bool:
+        """Check if URL is from a site with paywalls"""
+        domain = urlparse(url).netloc.lower()
+        return any(site in domain for site in self.PAID_SITES)
+
+    def get_novel_metadata(self, url: str) -> Dict:
+        """
+        Quickly fetch novel metadata (title, total chapters) without downloading content.
+        Used for limit enforcement before full scraping.
+
+        Returns: {'title': str, 'total_chapters': int, 'error': str (if failed)}
+        """
+        try:
+            logger.info(f"Fetching metadata for {url}")
+
+            # WebNovel.com scraping disabled: Playwright not supported on Termux/Android
+            # Be careful: 'freewebnovel.com' contains 'webnovel.com' so use exact domain check
+            domain = urlparse(url).netloc.lower()
+            if domain == 'webnovel.com' or domain == 'www.webnovel.com':
+                return {
+                    'title':
+                    'Unknown',
+                    'total_chapters':
+                    0,
+                    'error':
+                    'WebNovel.com scraping is not supported on this platform (Playwright required)'
+                }
+
+            # Special handling for Ranobes - count actual chapter links
+            if 'ranobes' in url:
+                return self._get_ranobes_metadata(url)
+
+            resp = self._get_with_retry(url)
+            if not resp:
+                # Browser-based fallback for sites that block plain requests
+                if self.use_playwright and 'novelbin' in url:
+                    html = self._browser_fetch_html(url)
+                    if not html:
+                        return {
+                            'title': 'Unknown',
+                            'total_chapters': 0,
+                            'error': 'Failed to fetch URL'
+                        }
+                    soup = BeautifulSoup(html, 'html.parser')
+                else:
+                    return {
+                        'title': 'Unknown',
+                        'total_chapters': 0,
+                        'error': 'Failed to fetch URL'
+                    }
+            else:
+                soup = BeautifulSoup(resp.content, 'html.parser')
+            title = self._extract_title(soup, url)
+            
+            # Extract full metadata (author, cover, translator, etc.)
+            metadata = self._extract_full_metadata(soup, url)
+
+            # Site-specific chapter counting
+            if 'novelbin' in url:
+                nb_count = self._get_novelbin_chapter_count(soup, url)
+                if nb_count:
+                    logger.info(
+                        f"Metadata: {title} - {nb_count} chapters (NovelBin chapter list)"
+                    )
+                    return {'title': title, 'total_chapters': nb_count, 'metadata': metadata}
+
+            # Use the same method as get_chapter_count for accuracy
+            total_chapters = 0
+
+            # Method 1: Extract chapter links from HTML (most accurate)
+            chapter_urls = self._get_chapter_links_from_html(soup, url)
+            if chapter_urls:
+                # Extract max chapter number from URLs
+                chapter_nums = set()
+                for ch_url in chapter_urls:
+                    chap_num = self._extract_chapter_number(ch_url)
+                    if chap_num and chap_num != 999999:
+                        chapter_nums.add(chap_num)
+                if chapter_nums:
+                    total_chapters = max(chapter_nums)
+                    logger.info(
+                        f"Metadata: {title} - {total_chapters} chapters (from HTML links)"
+                    )
+                    return {'title': title, 'total_chapters': total_chapters, 'metadata': metadata}
+
+            # Method 2: Look for "X chapters" text in page (fallback)
+            import re
+            page_text = soup.get_text()
+            match = re.search(r'(\d{2,})\s*(?:chapters?|ch\.)', page_text,
+                              re.IGNORECASE)
+            if match:
+                total_chapters = int(match.group(1))
+                logger.info(
+                    f"Metadata: {title} - {total_chapters} chapters (from page text)"
+                )
+                return {'title': title, 'total_chapters': total_chapters, 'metadata': metadata}
+
+            # Method 3: Count raw chapter links (last resort)
+            chapter_links = soup.find_all(
+                'a',
+                href=lambda h: h and
+                ('/chapter' in h.lower() or 'chapter-' in h.lower()))
+            if chapter_links:
+                total_chapters = len(chapter_links)
+
+            # Default if nothing found
+            if total_chapters == 0:
+                total_chapters = 500  # Conservative default
+
+            logger.info(f"Metadata: {title} - {total_chapters} chapters")
+            return {'title': title, 'total_chapters': total_chapters, 'metadata': metadata}
+
+        except Exception as e:
+            logger.error(f"Error fetching metadata: {e}")
+            return {'title': 'Unknown', 'total_chapters': 500, 'error': str(e)}
+
+    def get_chapter_count(self, url: str) -> int:
+        """Compatibility wrapper used by the bot to get total chapters.
+
+        Delegates to get_novel_metadata so all sites share the same logic.
+        Returns an integer chapter count (0 if unknown).
+        """
+        try:
+            meta = self.get_novel_metadata(url)
+            count = int(meta.get('total_chapters', 0) or 0)
+            logger.info(f"get_chapter_count({url}) -> {count}")
+            return count
+        except Exception as e:
+            logger.error(f"get_chapter_count error for {url}: {e}")
+            return 0
+
+    def _get_novelbin_chapter_count(self, soup: BeautifulSoup,
+                                     url: str) -> Optional[int]:
+        """Try to determine total chapters on NovelBin from chapter links.
+
+        Prefers the highest chapter number found in chapter URLs/text such as
+        "Chapter 156: ..." to avoid outdated "X chapters" counters.
+        """
+        try:
+            chapter_nums = set()
+
+            # Collect numbers from chapter links in the chapter list
+            links = soup.find_all(
+                'a',
+                href=lambda h: h and 'chapter' in h.lower())
+            for a in links:
+                href = a.get('href', '')
+                if not href:
+                    continue
+                full_url = urljoin(url, href)
+                num = self._extract_chapter_number(full_url)
+                if num and num != 999999:
+                    chapter_nums.add(num)
+
+            # Fallback: parse from "Chapter 156:" text if present
+            if not chapter_nums:
+                text = soup.get_text(" \n", strip=True)
+                m = re.findall(r'Chapter\s*(\d+)\s*:', text, re.I)
+                if m:
+                    for s in m:
+                        try:
+                            chapter_nums.add(int(s))
+                        except ValueError:
+                            continue
+
+            if chapter_nums:
+                return max(chapter_nums)
+        except Exception as e:
+            logger.warning(f"NovelBin chapter count error for {url}: {e}")
+        return None
+
+    def _count_ranobes_chapters(self, url: str) -> Optional[int]:
+        """Count total chapters for Ranobes by extracting from JavaScript data.
+
+        Uses the same method as the scraper - gets count_all from embedded JSON.
+        This ensures we get TRANSLATED chapters, not original chapters.
+        """
+        try:
+            logger.info(f"Counting Ranobes chapters for {url}")
+
+            # Extract novel ID from URL like https://ranobes.net/novels/164915-a-monster-who-levels-up.html
+            match = re.search(r'/novels/(\d+)', url)
+            if not match:
+                logger.warning(f"Could not extract novel ID from {url}")
+                return None
+
+            novel_id = match.group(1)
+            base_chapters_url = f"https://ranobes.net/chapters/{novel_id}/"
+
+            resp = self._get_with_retry(base_chapters_url)
+            if not resp:
+                logger.warning(f"Failed to fetch chapters page for count")
+                return None
+
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            dle_content = soup.find("div", id="dle-content")
+            if not dle_content:
+                logger.warning(f"No div#dle-content found")
+                return None
+
+            script_tag = dle_content.find("script")
+            if not script_tag or not script_tag.string:
+                logger.warning(f"No script tag with data found")
+                return None
+
+            # Extract JSON from window.__DATA__
+            import json
+            json_match = re.search(r'window\.__DATA__\s*=\s*(\{.*\})',
+                                   script_tag.string, re.DOTALL)
+            if not json_match:
+                logger.warning(f"No __DATA__ found in script")
+                return None
+
+            try:
+                data = json.loads(json_match.group(1))
+                total_chapters = data.get('count_all', 0)
+                if total_chapters > 0:
+                    logger.info(
+                        f"Ranobes: Got chapter count from JavaScript data: {total_chapters}"
+                    )
+                    return total_chapters
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON parse error: {e}")
+
+            logger.warning(
+                "Ranobes: Could not determine chapter count from JavaScript data"
+            )
+            return None
+        except Exception as e:
+            logger.error(f"Error counting Ranobes chapters: {e}")
+            return None
+
+    def _get_ranobes_metadata(self, url: str) -> Dict:
+        """Get Ranobes metadata including cover, author, genre, translator, status, chapters."""
+        try:
+            logger.info(f"Fetching Ranobes metadata for {url}")
+
+            resp = self._get_with_retry(url)
+            if not resp:
+                return {
+                    'title': 'Unknown',
+                    'total_chapters': 500,
+                    'error': 'Failed to fetch URL'
+                }
+
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            title = self._extract_title(soup, url)
+            count = self._count_ranobes_chapters(url) or 500
+
+            # Initialize metadata
+            metadata = {
+                'cover_image': None,
+                'author': None,
+                'translator': None,
+                'genre': None,
+                'status': None,
+                'status_coo': None,
+                'language': None,
+                'year': None,
+                'original_chapters': None,
+                'translated_chapters': None,
+                'publishers': None,
+                'description': None
+            }
+
+            # === COVER IMAGE ===
+            # Try figure.cover background-image first
+            cover_figure = soup.select_one('figure.cover')
+            if cover_figure:
+                style = cover_figure.get('style', '')
+                url_match = re.search(r'url\(["\']?([^"\'()]+)["\']?\)', style)
+                if url_match:
+                    metadata['cover_image'] = url_match.group(1)
+
+            # Fallback to img tag
+            if not metadata['cover_image']:
+                cover_img = soup.select_one(
+                    'figure.cover img, .r-fullstory-poster img, .poster img, link[itemprop="image"]'
+                )
+                if cover_img:
+                    src = cover_img.get('src') or cover_img.get('href')
+                    if src:
+                        metadata['cover_image'] = urljoin(url, src)
+
+            # === SPEC SECTION METADATA (li elements) ===
+            spec_section = soup.select_one('.r-fullstory-spec')
+            if spec_section:
+                li_elements = spec_section.find_all('li')
+                for li in li_elements:
+                    li_text = li.get_text(strip=True)
+
+                    # Status in COO
+                    if 'Status in COO:' in li_text:
+                        link = li.find('a')
+                        if link:
+                            metadata['status_coo'] = link.get_text(strip=True)
+
+                    # Translation status
+                    elif li_text.startswith('Translation:'):
+                        link = li.find('a')
+                        if link:
+                            metadata['status'] = link.get_text(strip=True)
+
+                    # In original chapters
+                    elif 'In original:' in li_text:
+                        match = re.search(r'(\d+)\s*chapters?', li_text,
+                                          re.IGNORECASE)
+                        if match:
+                            metadata['original_chapters'] = match.group(1)
+
+                    # Translated chapters
+                    elif li_text.startswith('Translated:'):
+                        match = re.search(r'(\d+)\s*chapters?', li_text,
+                                          re.IGNORECASE)
+                        if match:
+                            metadata['translated_chapters'] = match.group(1)
+
+                    # Year of publishing
+                    elif 'Year of publishing:' in li_text:
+                        span = li.find('span', itemprop='copyrightYear')
+                        if span:
+                            metadata['year'] = span.get_text(strip=True)
+                        else:
+                            match = re.search(r'(\d{4})', li_text)
+                            if match:
+                                metadata['year'] = match.group(1)
+
+                    # Language
+                    elif li_text.startswith('Language:'):
+                        span = li.find('span', itemprop='locationCreated')
+                        if span:
+                            link = span.find('a')
+                            metadata['language'] = link.get_text(
+                                strip=True) if link else span.get_text(
+                                    strip=True)
+
+                    # Authors
+                    elif 'Authors:' in li_text:
+                        author_span = li.find('span',
+                                              itemprop='creator') or li.find(
+                                                  'span', class_='tag_list')
+                        if author_span:
+                            links = author_span.find_all('a')
+                            if links:
+                                metadata['author'] = ', '.join(
+                                    a.get_text(strip=True) for a in links)
+
+                    # Translator
+                    elif li_text.startswith('Translator:'):
+                        trans_span = li.find('span', itemprop='translator')
+                        if trans_span:
+                            links = trans_span.find_all('a')
+                            if links:
+                                metadata['translator'] = ', '.join(
+                                    a.get_text(strip=True) for a in links)
+
+                    # Publishers
+                    elif 'Publishers:' in li_text:
+                        pub_span = li.find(
+                            'span', itemprop='publisher') or li.find(
+                                'span', class_='publishers_list')
+                        if pub_span:
+                            links = pub_span.find_all('a')
+                            if links:
+                                metadata['publishers'] = ', '.join(
+                                    a.get_text(strip=True) for a in links)
+
+            # === GENRE ===
+            genre_elems = soup.select(
+                '.r-fullstory-spec a[href*="/genre/"], .tag_list a[href*="/genre/"]'
+            )
+            if genre_elems:
+                genres = [g.get_text(strip=True) for g in genre_elems[:5]]
+                metadata['genre'] = ', '.join(genres)
+
+            # === DESCRIPTION ===
+            # Prioritize .moreless__full (complete text) over .moreless__short (truncated preview)
+            # Must check separately because select_one returns first in DOM order
+            desc_elem = soup.select_one('.moreless__full')
+            if not desc_elem:
+                desc_elem = soup.select_one('.moreless__short')
+            if not desc_elem:
+                # Fallback to other description selectors
+                desc_elem = soup.select_one(
+                    '.moreless_full, .r-description, .r-fullstory-desc, .description, '
+                    '[itemprop="description"], .novel-description, .book-description'
+                )
+
+            if desc_elem:
+                # Get all text content, preserving line breaks from <br> tags
+                desc_text = desc_elem.get_text(separator='\n', strip=True)
+
+                if desc_text:
+                    # Clean up HTML entities and extra whitespace
+                    desc_text = desc_text.replace('&nbsp;', ' ')
+                    desc_text = desc_text.replace('&amp;', '&')
+                    # Remove collapse/expand buttons
+                    desc_text = desc_text.replace('Collapse',
+                                                  '').replace('Read more', '')
+                    # Split into lines and remove empty lines
+                    lines = [
+                        line.strip() for line in desc_text.split('\n')
+                        if line.strip()
+                    ]
+                    # Rejoin with double newlines for paragraphs
+                    desc_text = '\n\n'.join(lines)
+                    # Keep full description (up to 5000 chars)
+                    metadata['description'] = desc_text[:5000]
+
+            # Log what was extracted
+            logger.info(
+                f"Ranobes metadata extracted: cover={bool(metadata.get('cover_image'))}, "
+                f"author={metadata.get('author')}, status_coo={metadata.get('status_coo')}, "
+                f"chapters={metadata.get('translated_chapters')}")
+
+            result = {
+                'title': title,
+                'total_chapters': count,
+                'metadata': metadata
+            }
+            return result
+
+        except Exception as e:
+            logger.error(f"Error fetching Ranobes metadata: {e}",
+                         exc_info=True)
+            return {'title': 'Unknown', 'total_chapters': 500, 'error': str(e)}
+
+    def scrape(self,
+               url: str,
+               chapter_start: int = 1,
+               chapter_end: Optional[int] = None) -> Dict:
+        """
+        Main entry point for scraping - coordinates metadata fetching and chapter downloading.
+        """
+        try:
+            # 1. Fetch metadata first to get title and confirm site support
+            metadata_result = self.get_novel_metadata(url)
+            if 'error' in metadata_result and not metadata_result.get('title'):
+                return {'error': metadata_result['error']}
+
+            title = metadata_result.get('title', 'Unknown Novel')
+            metadata = metadata_result.get('metadata', {})
+            total_available = metadata_result.get('total_chapters', 0)
+
+            # 2. Collect chapter links
+            if self.link_progress_callback:
+                self.link_progress_callback(0, 0, 'collecting')
+
+            chapter_links = []
+            if 'ranobes' in url:
+                chapter_links = self._get_ranobes_chapter_links(url)
+            else:
+                resp = self._get_with_retry(url)
+                if resp:
+                    soup = BeautifulSoup(resp.content, 'html.parser')
+                    chapter_links = self._get_chapter_links_from_html(
+                        soup, url)
+                elif self.use_playwright and 'novelbin' in url:
+                    html = self._browser_fetch_html(url)
+                    if html:
+                        soup = BeautifulSoup(html, 'html.parser')
+                        chapter_links = self._get_chapter_links_from_html(
+                            soup, url)
+
+            # Log what we collected so far
+            logger.info(
+                f"Collected {len(chapter_links)} chapter links for {url}")
+            if chapter_links:
+                logger.info(
+                    f"First few chapter links: {chapter_links[:5]}")
+
+            if not chapter_links:
+                return {
+                    'title': title,
+                    'chapters': [],
+                    'error': 'No chapter links found'
+                }
+
+            # 3. Filter chapters by range
+            # Sort by chapter number if possible
+            try:
+                chapter_links = sorted(
+                    chapter_links,
+                    key=lambda x: self._extract_chapter_number(x) or 0)
+            except Exception as e:
+                logger.warning(f"Sorting chapter links failed: {e}")
+
+            # Apply range
+            start_idx = max(0, chapter_start - 1)
+            end_idx = chapter_end if chapter_end else len(chapter_links)
+            target_links = chapter_links[start_idx:end_idx]
+
+            if not target_links:
+                return {
+                    'title':
+                    title,
+                    'chapters': [],
+                    'error':
+                    f'No chapters found in range {chapter_start}-{chapter_end}'
+                }
+
+            logger.info(
+                f"Downloading {len(target_links)} chapters for {title}")
+
+            total_to_download = len(target_links)
+            if self.progress_callback:
+                self.progress_callback(0, total_to_download)
+
+            # 4. Download chapters in parallel
+            chapters = []
+            with ThreadPoolExecutor(
+                    max_workers=self.parallel_workers) as executor:
+                future_to_url = {
+                    executor.submit(self._download_chapter, link_url, i + chapter_start, url):
+                    link_url
+                    for i, link_url in enumerate(target_links)
+                }
+
+                completed = 0
+                for future in as_completed(future_to_url):
+                    if self.cancel_check and self.cancel_check():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+
+                    try:
+                        chapter = future.result()
+                        if chapter:
+                            chapters.append(chapter)
+                    except Exception as e:
+                        logger.error(f"Chapter download failed: {e}")
+
+                    completed += 1
+                    if self.progress_callback:
+                        self.progress_callback(completed, total_to_download)
+
+            # Sort final chapters by number
+            chapters.sort(key=lambda x: x.get('chapter_num', 0))
+
+            return {
+                'title': title,
+                'metadata': metadata,
+                'chapters': chapters,
+                'novel_url': url,
+                'total_available': total_available
+            }
+        except Exception as e:
+            logger.error(f"Scrape error: {e}", exc_info=True)
+            return {'title': 'Unknown', 'chapters': [], 'error': str(e)}
+
+    def _get_ranobes_chapter_links(self, url: str) -> List[str]:
+        """Extract all chapter links for Ranobes using mathematical page calculation"""
+        try:
+            import math
+
+            # 1. Setup ID and Base URL
+            match = re.search(r'/novels/(\d+)', url)
+            if not match: match = re.search(r'/chapters/(\d+)', url)
+            if not match: return []
+
+            novel_id = match.group(1)
+            base_chapters_url = f"https://ranobes.net/chapters/{novel_id}/"
+
+            # 2. Fetch Page 1 to get the Data
+            logger.info(f"Fetching Page 1 data from {base_chapters_url}")
+            resp = self._get_with_retry(base_chapters_url)
+            if not resp: return []
+
+            soup = BeautifulSoup(resp.content, 'html.parser')
+
+            # 3. Extract JSON Data for precise calculation
+            # We need the 'count_all' (Total Chapters) to know how many pages exist
+            total_chapters = 0
+            page_size = 0
+
+            dle_content = soup.find("div", id="dle-content")
+            if dle_content:
+                script_tag = dle_content.find("script")
+                if script_tag and script_tag.string:
+                    import json
+                    json_match = re.search(r'window\.__DATA__\s*=\s*(\{.*\})',
+                                           script_tag.string, re.DOTALL)
+                    if json_match:
+                        try:
+                            data = json.loads(json_match.group(1))
+                            total_chapters = int(data.get('count_all', 0))
+                            current_page_chapters = data.get('chapters', [])
+                            page_size = len(current_page_chapters)
+                        except:
+                            pass
+
+            # 4. Get links from Page 1
+            all_links = self._extract_ranobes_links_from_soup(soup)
+
+            # If we couldn't read the page size, assume standard 10 or just use what we found
+            if page_size == 0: page_size = max(len(all_links), 10)
+
+            # 5. Calculate Total Pages
+            # Example: 157 total / 24 per page = 6.54 -> ceil -> 7 pages
+            if total_chapters > 0:
+                max_page = math.ceil(total_chapters / page_size)
+                logger.info(
+                    f"Math Calculation: {total_chapters} total / {page_size} per page = {max_page} pages"
+                )
+            else:
+                # Fallback to visual check if JSON failed
+                max_page = 1
+                pagination = soup.select(
+                    '.pages a, .navigation a, .pagination a')
+                for link in pagination:
+                    try:
+                        num = int(link.get_text(strip=True))
+                        if num > max_page: max_page = num
+                    except:
+                        pass
+                logger.info(f"Visual Calculation: Found {max_page} pages")
+
+            if max_page <= 1:
+                return all_links
+
+            # 6. Parallel Fetch Pages 2 to Max
+            page_urls = [
+                f"{base_chapters_url}page/{p}/"
+                for p in range(2, max_page + 1)
+            ]
+            logger.info(
+                f"Parallel fetching {len(page_urls)} additional pages...")
+
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                future_to_url = {
+                    executor.submit(self._fetch_ranobes_page_links, u): u
+                    for u in page_urls
+                }
+                for future in as_completed(future_to_url):
+                    try:
+                        links = future.result()
+                        if links: all_links.extend(links)
+                    except:
+                        pass
+
+            logger.info(f"Total chapters collected: {len(all_links)}")
+
+            # 7. Deduplicate and Return
+            return list(dict.fromkeys(all_links))
+
+        except Exception as e:
+            logger.error(f"Error getting Ranobes links: {e}")
+            return []
+
+    def _fetch_ranobes_page_links(self, url: str) -> List[str]:
+        """Helper for worker threads to fetch a single page"""
+        resp = self._get_with_retry(url)
+        if not resp: return []
+        soup = BeautifulSoup(resp.content, 'html.parser')
+        return self._extract_ranobes_links_from_soup(soup)
+
+    def _extract_ranobes_links_from_soup(self, soup) -> List[str]:
+        """Your original JSON extraction logic, moved to a helper function"""
+        try:
+            dle_content = soup.find("div", id="dle-content")
+            if not dle_content: return []
+
+            script_tag = dle_content.find("script")
+            if not script_tag or not script_tag.string: return []
+
+            import json
+            json_match = re.search(r'window\.__DATA__\s*=\s*(\{.*\})',
+                                   script_tag.string, re.DOTALL)
+            if not json_match: return []
+
+            data = json.loads(json_match.group(1))
+            chapters_data = data.get('chapters', [])
+
+            links = []
+            for chap in chapters_data:
+                link = chap.get('link')
+                if link:
+                    links.append(urljoin("https://ranobes.net", link))
+            return links
+        except:
+            return []
+
+    def _download_chapter(self, url: str, chapter_num: int, novel_url: str = None) -> Optional[Dict]:
+        """Download and parse a single chapter with aggressive cleaning.
+        
+        Uses cache to avoid re-downloading chapters that haven't changed.
+        """
+        try:
+            # Check cache first - chapter content doesn't change
+            if CACHE_AVAILABLE:
+                cache = get_cache()
+                cached = cache.get_chapter(url, novel_url)
+                if cached:
+                    logger.debug(f"[Chapter] Using cached chapter {chapter_num}")
+                    return cached
+            
+            logger.info(
+                f"[Chapter] Starting download for chapter {chapter_num} from {url}"
+            )
+
+            # For some sites (e.g., NovelBin), chapter pages may expect a Referer
+            referer = None
+            if 'novelbin' in url:
+                try:
+                    m = re.match(r'(https?://[^/]+/novel-book/[^/]+)', url)
+                    if m:
+                        referer = m.group(1)
+                except Exception:
+                    referer = None
+
+            resp = self._get_with_retry(url, referer=referer)
+            if not resp:
+                # Try browser-based fallback for NovelBin if enabled
+                if self.use_playwright and 'novelbin' in url:
+                    html = self._browser_fetch_html(url)
+                    if not html:
+                        logger.warning(
+                            f"[Chapter] Failed to fetch chapter URL after retries: {url}"
+                        )
+                        return None
+                    soup = BeautifulSoup(html, 'html.parser')
+                else:
+                    logger.warning(
+                        f"[Chapter] Failed to fetch chapter URL after retries: {url}"
+                    )
+                    return None
+            else:
+                soup = BeautifulSoup(resp.content, 'html.parser')
+            content = ""
+
+            # --- Ranobes Specific Cleaning ---
+            if 'ranobes' in url:
+                # Remove unwanted UI elements
+                for junk in soup.select(
+                    "script, style, .ads, .social-buttons, .navigation, .btn-group, .mechanic-buttons, "
+                    "#u_o, #u_b, #click_y, #bookmark, .bookmark, .footer, .bottom-menu, .stats, .report, "
+                    "a[href*='chapter-list'], a[href*='next-chapter'], .nav-buttons, .prev-next, .next-chapter, .prev-chapter"
+                ):
+                    junk.decompose()
+
+                # Try all possible containers for chapter text
+                # Tested selectors: #arrticle and .story work on current Ranobes
+                content_div = (
+                    soup.select_one('#arrticle') or  # Main container (not #arrticle-text!)
+                    soup.select_one('.story') or  # Alternative story container
+                    soup.select_one('#dle-content') or
+                    soup.select_one('.text.story-text') or
+                    soup.select_one('[id^="post-message"]')
+                )
+
+                if content_div:
+                    for tag in content_div.select('.ads, .nav-buttons, .bookmark, .report, div[align="center"]'):
+                        tag.decompose()
+                    raw_content = content_div.get_text(separator='\n\n', strip=True)
+                    lines = raw_content.split('\n')
+                    cleaned_lines = []
+                    for line in lines:
+                        l = line.strip()
+                        if l.upper() in [
+                            'OPTIONS', 'BOOKMARK', 'CHAPTERS LIST', 'NEXT >>', 'PREVIOUS',
+                            'REPORT', 'BACK', '<< BACK', 'NEXT', 'NEXT >>'
+                        ]:
+                            continue
+                        if re.match(r'^\d+\s*Report$', l, re.I):
+                            continue
+                        if l:
+                            cleaned_lines.append(l)
+                    content = '\n\n'.join(cleaned_lines)
+                else:
+                    # Fallback: extract all visible <p> tags from the main content area (include all non-empty lines)
+                    paragraphs = soup.find_all('p')
+                    cleaned_paragraphs = []
+                    for p in paragraphs:
+                        text = p.get_text(strip=True)
+                        if text:  # include all non-empty lines, even short ones
+                            cleaned_paragraphs.append(text)
+                    if cleaned_paragraphs:
+                        content = '\n\n'.join(cleaned_paragraphs)
+                        logger.warning(f"Used fallback <p> extraction for {url}")
+                    else:
+                        logger.warning(f"Could not find content container or fallback for {url}")
+                        content = "Error: Could not extract chapter text."
+            
+            # --- NovelFire Specific ---
+            elif 'novelfire' in url:
+                content_div = soup.select_one('#content, article, .chapter-content')
+                if content_div:
+                    for junk in content_div.select('script, style, .ads, .navigation, .chapter-nav, .prev-next'):
+                        junk.decompose()
+                    content = content_div.get_text(separator='\n\n', strip=True)
+            
+            # --- NovelBuddy Specific ---
+            elif 'novelbuddy' in url:
+                content_div = soup.select_one('.chapter__content, .content-inner, .viewer-content')
+                if content_div:
+                    for junk in content_div.select('script, style, .ads, .navigation, .chapter-nav'):
+                        junk.decompose()
+                    content = content_div.get_text(separator='\n\n', strip=True)
+            
+            # --- LNMTL Specific ---
+            elif 'lnmtl' in url:
+                content_div = soup.select_one('.chapter-body, .translated, .text-content')
+                if content_div:
+                    for junk in content_div.select('script, style, .ads'):
+                        junk.decompose()
+                    content = content_div.get_text(separator='\n\n', strip=True)
+            
+            # --- FreeWebNovel Specific ---
+            elif 'freewebnovel' in url:
+                content_div = soup.select_one('.txt, .chapter-content, #chapter-content')
+                if content_div:
+                    for junk in content_div.select('script, style, .ads'):
+                        junk.decompose()
+                    content = content_div.get_text(separator='\n\n', strip=True)
+            
+            else:
+                # --- Generic Site Handling ---
+                # Try a rich set of common selectors; some sites (like NovelBin)
+                # use specific containers such as .chapter-content or .reading-content
+                content_div = soup.select_one(
+                    '#chapter-content, #chr-content, .chapter-content, .reading-content, '
+                    '.chr-c, .chapter__content, .content-inner, article')
+                if content_div:
+                    for junk in content_div.select('script, style, .ads, .navigation'):
+                        junk.decompose()
+                    content = content_div.get_text(separator='\n\n', strip=True)
+
+            if not content:
+                logger.warning(
+                    f"[Chapter] Extracted EMPTY content for chapter {chapter_num} from {url}"
+                )
+            else:
+                logger.info(
+                    f"[Chapter] Extracted content length for chapter {chapter_num} from {url}: {len(content)} chars"
+                )
+
+            # Extract Title
+            title_tag = soup.find('h1')
+            title = title_tag.get_text(strip=True) if title_tag else f"Chapter {chapter_num}"
+
+            chapter_data = {
+                'title': title,
+                'content': content,
+                'chapter_num': chapter_num,
+                'url': url
+            }
+            
+            # Cache the chapter content (it doesn't change)
+            if CACHE_AVAILABLE and content:
+                cache = get_cache()
+                cache.set_chapter(url, chapter_data, novel_url)
+            
+            return chapter_data
+        except Exception as e:
+            logger.error(f"Error downloading chapter {url}: {e}")
+            return None
+
+    def _get_with_retry(self, url: str, referer: Optional[str] = None, max_retries: int = None) -> Optional[requests.Response]:
+        """Fetch URL with retries, rotating headers, and Cloudflare bypass attempts.
+
+        Strategy:
+        1. First try with normal headers
+        2. If 403/503, try with Cloudflare bypass headers
+        3. If still blocked, try alternative domain mirrors (if available)
+        4. Add small delays between retries to avoid rate limiting
+        
+        Logs detailed info to help debug site-specific blocking.
+        """
+        from urllib.parse import urlparse
+        
+        retries = max_retries if max_retries else self.max_retries
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        
+        # Identify which site we're hitting
+        site_key = None
+        for key in SITE_MIRRORS.keys():
+            if key in domain:
+                site_key = key
+                break
+        
+        logger.debug(f"[FETCH] Starting fetch for {url} (site: {site_key or 'unknown'})")
+        
+        for attempt in range(retries):
+            try:
+                # Strategy 1: Normal headers (attempt 0)
+                # Strategy 2: Cloudflare bypass headers (attempt 1+)
+                if attempt == 0:
+                    headers = self._get_random_headers(for_site=domain)
+                    logger.debug(f"[FETCH] Attempt {attempt + 1}: Using normal headers")
+                else:
+                    headers = self._get_cloudflare_bypass_headers(url)
+                    # Also create a fresh session for Cloudflare bypass
+                    logger.debug(f"[FETCH] Attempt {attempt + 1}: Using Cloudflare bypass headers")
+                
+                if referer:
+                    headers['Referer'] = referer
+                
+                resp = self.session.get(url, headers=headers, timeout=15, allow_redirects=True)
+                
+                # Log response details for debugging
+                logger.debug(f"[FETCH] Response: status={resp.status_code}, url={resp.url}, cookies={len(resp.cookies)}")
+                
+                if resp.status_code == 200:
+                    # Check for Cloudflare challenge page
+                    content_sample = resp.text[:500].lower() if resp.text else ''
+                    if 'checking your browser' in content_sample or 'cloudflare' in content_sample and 'challenge' in content_sample:
+                        logger.warning(f"[CLOUDFLARE] Detected Cloudflare challenge on {url}")
+                        # Don't return - continue to next retry with different approach
+                    else:
+                        logger.info(f"[FETCH] ✓ Success: {url}")
+                        return resp
+                elif resp.status_code == 403:
+                    logger.warning(f"[FETCH] Attempt {attempt + 1}: 403 Forbidden for {url}")
+                elif resp.status_code == 503:
+                    logger.warning(f"[FETCH] Attempt {attempt + 1}: 503 Service Unavailable (likely Cloudflare) for {url}")
+                elif resp.status_code == 429:
+                    logger.warning(f"[FETCH] Attempt {attempt + 1}: 429 Rate Limited for {url}")
+                    time.sleep(3)  # Longer delay for rate limiting
+                else:
+                    logger.warning(f"[FETCH] Attempt {attempt + 1}: HTTP {resp.status_code} for {url}")
+                
+                # Small delay before retry
+                time.sleep(1 + attempt * 0.5)
+                
+            except requests.exceptions.Timeout:
+                logger.warning(f"[FETCH] Attempt {attempt + 1}: Timeout for {url}")
+                time.sleep(2)
+            except requests.exceptions.ConnectionError as e:
+                logger.warning(f"[FETCH] Attempt {attempt + 1}: Connection error for {url}: {e}")
+                time.sleep(2)
+            except Exception as e:
+                logger.warning(f"[FETCH] Attempt {attempt + 1}: Error for {url}: {type(e).__name__}: {e}")
+                time.sleep(1)
+        
+        # All retries failed - try alternative domain mirrors if available
+        if site_key and site_key in SITE_MIRRORS:
+            logger.info(f"[FETCH] Trying alternative mirrors for {site_key}...")
+            for mirror_domain in SITE_MIRRORS[site_key]:
+                if mirror_domain in url:
+                    continue  # Skip the domain we already tried
+                
+                # Replace domain in URL
+                alt_url = url.replace(domain, mirror_domain)
+                logger.info(f"[FETCH] Trying mirror: {alt_url}")
+                
+                try:
+                    headers = self._get_cloudflare_bypass_headers(alt_url)
+                    resp = self.session.get(alt_url, headers=headers, timeout=15, allow_redirects=True)
+                    
+                    if resp.status_code == 200:
+                        content_sample = resp.text[:500].lower() if resp.text else ''
+                        if 'checking your browser' not in content_sample:
+                            logger.info(f"[FETCH] ✓ Mirror success: {alt_url}")
+                            return resp
+                    else:
+                        logger.debug(f"[FETCH] Mirror {mirror_domain} returned {resp.status_code}")
+                except Exception as e:
+                    logger.debug(f"[FETCH] Mirror {mirror_domain} failed: {e}")
+                
+                time.sleep(0.5)
+        
+        logger.error(f"[FETCH] ✗ All attempts failed for {url}")
+        return None
+
+    def _browser_fetch_html(self, url: str) -> Optional[str]:
+        """Fetch page HTML using Playwright or Selenium as a last resort.
+
+        This is only used for hard-blocked sites like NovelBin when
+        ``use_playwright`` is True and the necessary dependencies are
+        installed in the environment.
+        
+        Uses playwright-stealth to avoid detection by anti-bot systems.
+        """
+        # --- Try Playwright with stealth first ---
+        try:
+            from playwright.sync_api import sync_playwright  # type: ignore
+            
+            # Try to import stealth
+            try:
+                from playwright_stealth import stealth_sync  # type: ignore
+                use_stealth = True
+            except ImportError:
+                use_stealth = False
+                logger.debug("playwright-stealth not available")
+
+            try:
+                with sync_playwright() as p:
+                    # Use Chromium with stealth (better anti-detection)
+                    browser = p.chromium.launch(headless=True)
+                    context = browser.new_context(
+                        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                        viewport={'width': 1920, 'height': 1080},
+                        locale='en-US',
+                    )
+                    page = context.new_page()
+                    
+                    # Apply stealth if available
+                    if use_stealth:
+                        stealth_sync(page)
+                    
+                    page.goto(url, wait_until='networkidle', timeout=30000)
+                    
+                    # Wait for browser check to complete if present
+                    title = page.title()
+                    if 'just a moment' in title.lower() or 'checking' in title.lower():
+                        logger.debug(f"Browser check detected, waiting for redirect...")
+                        # Wait up to 15 seconds for the page to change
+                        try:
+                            page.wait_for_function(
+                                "() => !document.title.toLowerCase().includes('moment') && !document.title.toLowerCase().includes('checking')",
+                                timeout=15000
+                            )
+                            page.wait_for_load_state('networkidle', timeout=10000)
+                        except Exception:
+                            logger.debug("Timeout waiting for browser check to complete")
+                    
+                    html = page.content()
+                    browser.close()
+                    logger.info(f"Playwright fetched HTML for {url}")
+                    return html
+            except Exception as e:
+                logger.warning(f"Playwright fetch failed for {url}: {e}")
+        except Exception:
+            logger.debug("Playwright not available; skipping")
+
+        # --- Fallback: Selenium (requires driver installed) ---
+        try:
+            from selenium import webdriver  # type: ignore
+            from selenium.webdriver.chrome.options import Options  # type: ignore
+
+            try:
+                options = Options()
+                options.add_argument("--headless=new")
+                options.add_argument("--disable-gpu")
+                options.add_argument("--no-sandbox")
+                driver = webdriver.Chrome(options=options)
+                driver.get(url)
+                time.sleep(5)
+                html = driver.page_source
+                driver.quit()
+                logger.info(f"Selenium fetched HTML for {url}")
+                return html
+            except Exception as e:
+                logger.warning(f"Selenium fetch failed for {url}: {e}")
+        except Exception:
+            logger.debug("Selenium not available; skipping")
+
+        return None
+
+    def _extract_title(self, soup: BeautifulSoup, url: str) -> str:
+        """Extract novel title from soup, cleaning site-specific suffixes"""
+        domain = urlparse(url).netloc.lower()
+        
+        # Try site-specific title selectors first
+        title = None
+        
+        if 'freewebnovel' in domain:
+            # FreeWebNovel: title in h1.tit or .book-name
+            title_tag = soup.select_one('h1.tit, .book-name, .novel-title')
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+        
+        elif 'novelfire' in domain:
+            title_tag = soup.select_one('.novel-title, h1.name')
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+        
+        elif 'novelbuddy' in domain:
+            title_tag = soup.select_one('.novel-title, h1')
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+        
+        elif 'royalroad' in domain:
+            title_tag = soup.select_one('h1')
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+        
+        elif 'lnmtl' in domain:
+            title_tag = soup.select_one('.novel-name, h1.title')
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+        
+        # Fallback to generic h1 or title
+        if not title:
+            title_tag = soup.find('h1') or soup.find('title')
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+        
+        if not title:
+            return "Unknown Novel"
+
+        # Clean up title
+        if 'ranobes' in url:
+            title = re.split(r'[•|]', title)[0].strip()
+            title = re.sub(r'\s*online\s*-\s*RANOBES\.NET.*', '', title, flags=re.I)
+            title = re.sub(r'\s*-\s*Read.*', '', title, flags=re.I)
+        
+        # Remove common suffixes
+        title = re.sub(r'\s*-\s*Free Web Novel.*', '', title, flags=re.I)
+        title = re.sub(r'\s*-\s*Read Free.*', '', title, flags=re.I)
+        title = re.sub(r'\s*\|\s*Novel.*', '', title, flags=re.I)
+        title = re.sub(r'\s*-\s*Novel\s*$', '', title, flags=re.I)
+        
+        return title.strip()
+
+    def _extract_full_metadata(self, soup: BeautifulSoup, url: str) -> Dict:
+        """Extract comprehensive metadata (author, cover, translator, genre, status) from any site"""
+        domain = urlparse(url).netloc.lower()
+        metadata = {
+            'author': None,
+            'cover_image': None,
+            'translator': None,
+            'genre': None,
+            'status': None,
+            'description': None,
+        }
+        
+        # === AUTHOR ===
+        author_selectors = [
+            # FreeWebNovel
+            '.author a', '.info a[href*="/author/"]', 
+            # NovelFire / NovelBin
+            '.author-name', 'a[href*="/author/"]',
+            # NovelBuddy - check author-content
+            '.author-content a', '.author-content',
+            # RoyalRoad
+            '.author a', '.fiction-info a[href*="/profile/"]',
+            # LNMTL
+            '.novel-author', '.panel-body a[href*="/author/"]',
+            # Generic
+            '[itemprop="author"]', '.author', 'span.author',
+        ]
+        for sel in author_selectors:
+            try:
+                el = soup.select_one(sel)
+                if el:
+                    author = el.get_text(strip=True)
+                    if author and author.lower() not in ['author', 'authors', 'n/a', 'unknown', '']:
+                        metadata['author'] = author
+                        break
+            except:
+                pass
+        
+        # Fallback 1: LNMTL style - <dt>Authors</dt><dd>Name</dd>
+        if not metadata['author']:
+            try:
+                dt_author = soup.find('dt', string=re.compile(r'^Authors?$', re.I))
+                if dt_author:
+                    dd = dt_author.find_next_sibling('dd')
+                    if dd:
+                        author = dd.get_text(strip=True)
+                        if author and len(author) < 100:
+                            metadata['author'] = author
+            except:
+                pass
+        
+        # Fallback 2: regex search for "Author: X" pattern in page text
+        if not metadata['author']:
+            try:
+                page_text = soup.get_text()
+                match = re.search(r'Author[s]?[:\s]+([A-Za-z0-9_\-\s]+?)(?:\n|Status|Genre|Chapter|Current)', page_text)
+                if match:
+                    author = match.group(1).strip()
+                    if author and len(author) < 50:
+                        metadata['author'] = author
+            except:
+                pass
+        
+        # === COVER IMAGE ===
+        cover_selectors = [
+            # FreeWebNovel
+            '.pic img', '.book-img img', '.cover img',
+            # NovelFire / NovelBin
+            '.novel-cover img', '.book-cover img', '.cover-detail img',
+            # NovelBuddy
+            '.cover img', '.novel-cover img',
+            # RoyalRoad
+            '.cover-art-container img', '.fiction-cover img',
+            # LNMTL
+            '.novel-cover img', '.novel img',
+            # Generic
+            'img[alt*="cover"]', '.novel-img img', '.thumbnail img',
+        ]
+        for sel in cover_selectors:
+            try:
+                el = soup.select_one(sel)
+                if el:
+                    src = el.get('src') or el.get('data-src') or el.get('data-lazy-src')
+                    if src and 'placeholder' not in src.lower() and 'nocover' not in src.lower():
+                        if not src.startswith('http'):
+                            src = urljoin(url, src)
+                        metadata['cover_image'] = src
+                        break
+            except:
+                pass
+        
+        # === TRANSLATOR ===
+        trans_selectors = [
+            'a[href*="/translator/"]', '.translator a', '[itemprop="translator"]',
+            '.info li:contains("Translator") a',
+        ]
+        for sel in trans_selectors:
+            try:
+                el = soup.select_one(sel)
+                if el:
+                    trans = el.get_text(strip=True)
+                    if trans and trans.lower() not in ['translator', 'n/a']:
+                        metadata['translator'] = trans
+                        break
+            except:
+                pass
+        
+        # === GENRE ===
+        genre_selectors = [
+            '.genres a', '.genre a', '.tags a', '[itemprop="genre"]',
+            '.book-info .tag', '.novel-tags a',
+        ]
+        genres = []
+        for sel in genre_selectors:
+            try:
+                elements = soup.select(sel)
+                for el in elements[:10]:
+                    g = el.get_text(strip=True)
+                    if g and g.lower() not in ['genres', 'tags'] and len(g) < 50:
+                        genres.append(g)
+            except:
+                pass
+        if genres:
+            metadata['genre'] = ', '.join(genres[:5])
+        
+        # === STATUS ===
+        status_selectors = [
+            '.status', '.novel-status', '[itemprop="status"]',
+            '.info li:contains("Status")',
+        ]
+        for sel in status_selectors:
+            try:
+                el = soup.select_one(sel)
+                if el:
+                    status = el.get_text(strip=True)
+                    if 'ongoing' in status.lower():
+                        metadata['status'] = 'Ongoing'
+                        break
+                    elif 'complet' in status.lower():
+                        metadata['status'] = 'Completed'
+                        break
+            except:
+                pass
+        
+        # === DESCRIPTION ===
+        desc_selectors = [
+            '.summary', '.description', '.synopsis', '[itemprop="description"]',
+            '.book-intro', '.novel-description', '.desc-text',
+        ]
+        for sel in desc_selectors:
+            try:
+                el = soup.select_one(sel)
+                if el:
+                    desc = el.get_text(strip=True)
+                    if desc and len(desc) > 50:
+                        metadata['description'] = desc[:2000]
+                        break
+            except:
+                pass
+        
+        return metadata
+
+    def _get_chapter_links_from_html(self, soup: BeautifulSoup,
+                                     url: str) -> List[str]:
+        """Extract chapter links from HTML with site-specific handling.
+
+        Uses site-specific selectors where needed and otherwise falls back
+        to common chapter list patterns.
+        """
+        links: List[str] = []
+        base = url
+        domain = urlparse(url).netloc.lower()
+        
+        logger.debug(f"[CHAPTERS] Extracting chapter links from {domain}")
+
+        # === NovelBin ===
+        if 'novelbin' in domain:
+            containers = soup.select('#chapter-list, .chapter-list, .list-chapter, #list-chapter')
+            if not containers:
+                containers = [soup]
+            for cont in containers:
+                for a in cont.find_all('a', href=True):
+                    href = a['href']
+                    if 'chapter' in href.lower() or '/c' in href.lower():
+                        full = urljoin(base, href)
+                        if full not in links:
+                            links.append(full)
+        
+        # === NovelFire ===
+        elif 'novelfire' in domain:
+            # NovelFire uses .chapter-list for chapter links
+            containers = soup.select('.chapter-list a')
+            for a in containers:
+                href = a.get('href', '')
+                if href and '/chapter-' in href.lower():
+                    full = urljoin(base, href)
+                    if full not in links:
+                        links.append(full)
+        
+        # === Ranobes ===
+        elif 'ranobes' in domain:
+            # Ranobes has chapters in .chapters-list or script data
+            containers = soup.select('.chapters-list a, .chapter-item a, #chapters-list a')
+            for a in containers:
+                href = a.get('href', '')
+                if href and '/read-' in href or '/chapters/' in href:
+                    full = urljoin(base, href)
+                    if full not in links:
+                        links.append(full)
+        
+        # === FreeWebNovel ===
+        elif 'freewebnovel' in domain:
+            containers = soup.select('.chapter-list a, .m-newest2 a, .chapter-item a')
+            for a in containers:
+                href = a.get('href', '')
+                if href and 'chapter' in href.lower():
+                    full = urljoin(base, href)
+                    if full not in links:
+                        links.append(full)
+        
+        # === LightNovelWorld / LightNovelCave ===
+        elif 'lightnovelworld' in domain or 'lightnovelcave' in domain or 'lnworld' in domain:
+            containers = soup.select('.chapter-list a, .chapter-item a, ul.chapter-list a')
+            for a in containers:
+                href = a.get('href', '')
+                if href and '/chapter-' in href.lower():
+                    full = urljoin(base, href)
+                    if full not in links:
+                        links.append(full)
+        
+        # === BoxNovel / WordPress Manga Theme ===
+        elif 'boxnovel' in domain or 'bednovel' in domain or 'fullnovels' in domain:
+            containers = soup.select('.wp-manga-chapter a, .chapter-link a, .version-chap a')
+            for a in containers:
+                href = a.get('href', '')
+                if href and 'chapter' in href.lower():
+                    full = urljoin(base, href)
+                    if full not in links:
+                        links.append(full)
+        
+        # === RoyalRoad ===
+        elif 'royalroad' in domain:
+            containers = soup.select('#chapters tbody tr a, .chapter-row a')
+            for a in containers:
+                href = a.get('href', '')
+                if href and '/chapter/' in href:
+                    full = urljoin(base, href)
+                    if full not in links:
+                        links.append(full)
+        
+        # === NovelBuddy ===
+        elif 'novelbuddy' in domain:
+            # NovelBuddy uses /chapter- pattern in URLs
+            for a in soup.find_all('a', href=True):
+                href = a.get('href', '')
+                if '/chapter-' in href.lower():
+                    full = urljoin(base, href)
+                    if full not in links:
+                        links.append(full)
+        
+        # === LibRead ===
+        elif 'libread' in domain:
+            # LibRead uses various chapter list containers
+            for sel in ['.chapter-list a', '.chapters a', 'ul.list-chapter a', '.ul-list3 a']:
+                containers = soup.select(sel)
+                for a in containers:
+                    href = a.get('href', '')
+                    if href and 'chapter' in href.lower():
+                        full = urljoin(base, href)
+                        if full not in links:
+                            links.append(full)
+                if links:
+                    break
+        
+        # === ReadNovelFull ===
+        elif 'readnovelfull' in domain:
+            containers = soup.select('.list-chapter a, #list-chapter a, .chapter-list a')
+            for a in containers:
+                href = a.get('href', '')
+                if href and 'chapter' in href.lower():
+                    full = urljoin(base, href)
+                    if full not in links:
+                        links.append(full)
+
+        # === Generic fallback: any anchor with "chapter" in href ===
+        if not links:
+            logger.debug(f"[CHAPTERS] No site-specific links found, using generic fallback")
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                # Match various chapter URL patterns
+                if re.search(r'chapter[-_]?\d+|/ch[-_]?\d+|/c\d+', href.lower()):
+                    full = urljoin(base, href)
+                    if full not in links:
+                        links.append(full)
+            
+            # If still no links, try broader pattern
+            if not links:
+                for a in soup.find_all('a', href=True):
+                    href = a['href']
+                    if 'chapter' in href.lower():
+                        full = urljoin(base, href)
+                        if full not in links:
+                            links.append(full)
+
+        logger.info(f"[CHAPTERS] Found {len(links)} chapter links for {url}")
+        if links and len(links) <= 5:
+            logger.debug(f"[CHAPTERS] Sample links: {links[:5]}")
+
+        return links
+
+    def _extract_chapter_number(self, url: str) -> Optional[int]:
+        """Extract chapter number from URL for correct sorting"""
+        try:
+            # 1. Look for 'chapter-123' pattern (common in most URLs)
+            match = re.search(r'chapter[-_]?(\d+)', url, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+
+            # 2. Look for number at the end of URL (e.g., .../123.html)
+            match = re.search(r'/(\d+)(?:\.html)?$', url)
+            if match:
+                return int(match.group(1))
+
+            # 3. Look for 'c123' pattern
+            match = re.search(r'/c(\d+)', url, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+
+            return 999999  # If no number found, push to end of list
+        except:
+            return 999999
+
+    def _get_random_headers(self, for_site: str = None) -> Dict[str, str]:
+        """Get headers for HTTP requests with anti-Cloudflare evasion.
+
+        We keep a stable User-Agent per Scraper instance to look more like a
+        real browser session, but randomize it once when the Scraper is
+        created. Other headers stay consistent across requests.
+        
+        Args:
+            for_site: Optional domain hint (e.g., 'novelbin.com') to set proper Referer/Origin
+        """
+        ua = self.headers.get('User-Agent') or random.choice(USER_AGENTS)
+        
+        # Base headers that look like a real browser
+        headers = {
+            'User-Agent': ua,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+            'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+        }
+        
+        # If we know the site, add proper Referer for cross-origin requests
+        if for_site:
+            headers['Referer'] = f'https://{for_site}/'
+            headers['Origin'] = f'https://{for_site}'
+        
+        return headers
+
+    def _get_cloudflare_bypass_headers(self, url: str) -> Dict[str, str]:
+        """Get specialized headers for Cloudflare-protected sites."""
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        
+        # Use a fresh random UA for Cloudflare bypass attempts
+        ua = random.choice(USER_AGENTS)
+        
+        return {
+            'User-Agent': ua,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Referer': f'https://{domain}/',
+            'Origin': f'https://{domain}',
+            'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'DNT': '1',
+        }
+
+    def _random_delay(self, min_delay: float = 0.5, max_delay: float = 1.5):
+        """Add random delay between requests to avoid rate limiting"""
+        self.request_count += 1
+        delay = random.uniform(min_delay, max_delay)
+        time.sleep(delay)
+
+    def search_novelbin(self, query: str) -> Optional[str]:
+        """Search NovelBin for a novel by title"""
+        try:
+            search_url = f"https://novelbin.me/?s={query.replace(' ', '+')}"
+            resp = self.session.get(search_url,
+                                headers=self._get_random_headers(for_site='novelbin.me'),
+                                timeout=10)
+            if resp.status_code != 200:
+                logger.warning(f"[NovelBin] Search returned status {resp.status_code}")
+                return None
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            # Look for first result link
+            result = soup.select_one('.list-items .item-info .novel-name a')
+            if result and result.get('href'):
+                return result['href']
+        except Exception as e:
+            logger.error(f"NovelBin search error: {e}")
+        return None
+
+    def search_novelbin_multiple(self, query: str) -> List[Dict[str, str]]:
+        """Search NovelBin and return multiple results with titles.
+        
+        Tries multiple domains with Cloudflare bypass headers.
+        """
+        results = []
+
+        # Try multiple NovelBin domains - order by reliability
+        domains = [
+            'https://novelbin.me', 'https://novelbin.com',
+            'https://novelbin.cfd', 'https://novelbin.net',
+            'https://novelbin.org', 'https://novelbin.cc'
+        ]
+
+        for domain in domains:
+            if len(results) >= 10:
+                break
+            try:
+                # NovelBin uses /search?keyword= endpoint
+                search_url = f"{domain}/search?keyword={quote_plus(query)}"
+                
+                # Use Cloudflare bypass headers
+                domain_name = domain.replace('https://', '')
+                headers = self._get_cloudflare_bypass_headers(search_url)
+                
+                logger.debug(f"[NovelBin] Trying {domain} for query: {query}")
+                resp = self.session.get(search_url, headers=headers, timeout=10)
+                
+                if resp.status_code == 403:
+                    logger.debug(f"[NovelBin] {domain} returned 403, trying next...")
+                    continue
+                elif resp.status_code != 200:
+                    logger.debug(f"[NovelBin] {domain} returned {resp.status_code}")
+                    continue
+                
+                # Check for Cloudflare challenge
+                content = resp.text[:500].lower()
+                if 'checking your browser' in content or ('cloudflare' in content and 'challenge' in content):
+                    logger.debug(f"[NovelBin] {domain} returned Cloudflare challenge")
+                    continue
+                    
+                soup = BeautifulSoup(resp.content, 'html.parser')
+
+                # NovelBin uses h3.novel-title a for results
+                items = soup.select('h3.novel-title a')
+                if not items:
+                    items = soup.select('.novel-title a')
+                if not items:
+                    items = soup.select('.list-novel a[href*="/novel-book/"]')
+                if not items:
+                    items = soup.select('a[href*="/novel-book/"], a[href*="/b/"]')
+                if not items:
+                    items = soup.find_all('a', href=lambda h: h and ('/novel-book/' in h or '/b/' in h))
+
+                for item in items[:5]:
+                    href = item.get('href', '')
+                    if href and ('/novel-book/' in href or '/novel/' in href or '/b/' in href):
+                        # Make absolute URL
+                        if not href.startswith('http'):
+                            href = domain + href
+                        title = item.get('title') or item.get_text(strip=True)
+                        if title and len(title) > 2 and not any(r['url'] == href for r in results):
+                            results.append({
+                                'title': title,
+                                'url': href,
+                                'source': 'NovelBin'
+                            })
+                            
+                if results:
+                    logger.info(f"[NovelBin] Found {len(results)} results from {domain}")
+                    break  # Got results from this domain
+            except requests.exceptions.Timeout:
+                logger.debug(f"[NovelBin] Timeout on {domain}")
+                continue
+            except Exception as e:
+                logger.debug(f"[NovelBin] Error on {domain}: {type(e).__name__}: {e}")
+                continue
+
+        return results
+
+    def search_royalroad(self, query: str) -> Optional[str]:
+        """Search RoyalRoad for a novel by title"""
+        try:
+            search_url = f"https://www.royalroad.com/fictions/search?title={quote_plus(query)}"
+            resp = requests.get(search_url,
+                                headers=self._get_random_headers(),
+                                timeout=10)
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            result = soup.select_one('.fiction-list-item .fiction-title a')
+            if result and result.get('href'):
+                return urljoin("https://www.royalroad.com", result['href'])
+        except Exception as e:
+            logger.error(f"RoyalRoad search error: {e}")
+        return None
+
+    def search_royalroad_multiple(self, query: str) -> List[Dict[str, str]]:
+        """Search RoyalRoad and return multiple results with titles"""
+        results = []
+        try:
+            search_url = f"https://www.royalroad.com/fictions/search?title={quote_plus(query)}"
+            resp = self.session.get(search_url,
+                                headers=self._get_random_headers(),
+                                timeout=15)
+            soup = BeautifulSoup(resp.content, 'html.parser')
+
+            # RoyalRoad uses .fiction-title a for results
+            items = soup.select('.fiction-title a')
+            
+            for item in items[:10]:
+                href = item.get('href', '')
+                title = item.get_text(strip=True)
+                if title and href:  # Just need both to exist
+                    full_url = urljoin("https://www.royalroad.com", href)
+                    results.append({
+                        'title': title,
+                        'url': full_url,
+                        'source': 'RoyalRoad'
+                    })
+                if len(results) >= 5:
+                    break
+                    
+            logger.info(f"[RoyalRoad] Found {len(results)} results for '{query}'")
+        except Exception as e:
+            logger.error(f"RoyalRoad search error: {e}")
+        return results

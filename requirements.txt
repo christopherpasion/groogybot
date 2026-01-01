@@ -1,0 +1,29 @@
+# Discord Bot Dependencies
+discord.py[voice]>=2.3.0
+PyNaCl>=1.5.0
+
+# Web Scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+brotli>=1.1.0
+cloudscraper>=1.2.71
+
+# Browser Automation (for protected sites)
+playwright>=1.40.0
+playwright-stealth>=1.0.6
+
+# EPUB/PDF Generation
+ebooklib>=0.18
+reportlab>=4.0.0
+Pillow>=10.0.0
+
+# Text-to-Speech
+edge-tts>=6.1.0
+
+# Timezone handling
+pytz>=2023.3
+
+# HTTP utilities
+aiohttp>=3.9.0
+urllib3>=2.0.0

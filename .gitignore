@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.env
+.env.*
+
+# VSCode
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+env/
+venv/
+ENV/
+
+# Logs
+*.log
+
+# Docker
+*.pid
+docker-compose.override.yml
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Secrets
+.env.example
