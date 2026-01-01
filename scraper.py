@@ -2170,12 +2170,12 @@ class Scraper:
                     'status': 'in_progress'
                 })
             
-            # Ranobes: Use sequential downloads to avoid FlareSolverr parallel caching bug
-            # (same session + parallel requests = identical cached responses)
+            # Ranobes: Use regular requests (not FlareSolverr) so parallel is safe
+            # Regular requests work fine for chapter content, only list pages need FlareSolverr
             chapter_workers = self.parallel_workers
             if 'ranobes' in url:
-                chapter_workers = 1  # Sequential to avoid FlareSolverr returning same cached content
-                logger.info(f"[Ranobes] Using sequential chapter downloads (FlareSolverr cache workaround)")
+                chapter_workers = min(10, self.parallel_workers)  # 10 parallel workers for Ranobes
+                logger.info(f"[Ranobes] Using {chapter_workers} parallel workers for chapter downloads")
             
             with ThreadPoolExecutor(
                     max_workers=chapter_workers) as executor:
@@ -2840,14 +2840,19 @@ class Scraper:
             html_content = None
             soup = None
             
-            # Try FlareSolverr first for Ranobes
-            if 'ranobes' in url and self.flaresolverr_enabled:
+            # For Ranobes chapters: use regular requests (faster + parallel safe)
+            # FlareSolverr is only needed for chapter LIST pages, not content
+            # Regular requests work fine for chapter content (proven in logs)
+            
+            # Fallback to regular requests first for Ranobes
+            if 'ranobes' not in url and self.flaresolverr_enabled:
+                # Use FlareSolverr for non-Ranobes protected sites
                 html_content = self._fetch_with_flaresolverr(url)
                 if html_content:
                     soup = BeautifulSoup(html_content, 'html.parser')
                     logger.info(f"[Chapter] FlareSolverr succeeded for chapter {chapter_num}")
             
-            # Fallback to regular requests
+            # Regular requests (primary for Ranobes, fallback for others)
             if not soup:
                 resp = self._get_with_retry(
                     url,
