@@ -2261,18 +2261,21 @@ class Scraper:
 
             # 7. Deduplicate and filter
             deduped = list(dict.fromkeys(all_links))
-            # Filter out the novel page itself and keep likely chapter pages
             filtered = []
+            base_url = url.rstrip('/')
             for link in deduped:
                 if not link:
                     continue
-                if link.rstrip('/') == url.rstrip('/'):
+                norm = link.rstrip('/')
+                # Skip the novel page itself
+                if norm == base_url:
                     continue
-                if novel_id in link and link.endswith('.html'):
+                # Keep .html chapter-like links
+                if norm.endswith('.html'):
                     filtered.append(link)
                     continue
-                # Allow other ranobes chapter-style html pages
-                if link.endswith('.html'):
+                # Keep links containing the novel id (even without .html) as a last resort
+                if novel_id in norm:
                     filtered.append(link)
             return filtered
 
@@ -2294,9 +2297,13 @@ class Scraper:
                 ])
             selectors.extend([
                 f'a[href*="-{novel_id}/"]',  # Links containing novel ID
+                f'a[href*="{novel_id}-"]',   # ID followed by chapter
+                f'a[href*="{novel_id}"][href$=".html"]',
                 'a[href*="/chapter"]',  # Generic chapter links
                 '.chapter-link a',  # Class-based
-                'a[data-chapter]'  # Data attribute
+                'a[data-chapter]',  # Data attribute
+                'a[data-chapter-id]',
+                'a[data-number]'
             ])
             
             for selector in selectors:
