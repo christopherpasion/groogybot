@@ -1555,20 +1555,33 @@ class Scraper:
 
             if script_tag:
                 import json
-                json_match = re.search(r'window\.__DATA__\s*=\s*(\{.*?\})',
-                                       script_tag.string or script_tag.get_text() or "",
-                                       re.DOTALL)
-                if json_match:
-                    try:
-                        data = json.loads(json_match.group(1))
-                        total_chapters = int(data.get('count_all', 0))
-                        if total_chapters > 0:
-                            logger.info(
-                                f"Ranobes: Got chapter count from JavaScript data: {total_chapters}"
-                            )
-                            return total_chapters
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"JSON parse error: {e}")
+                script_text = script_tag.string or script_tag.get_text() or ""
+                # Use brace balancing for robust JSON extraction
+                json_start = script_text.find('window.__DATA__')
+                if json_start != -1:
+                    brace_start = script_text.find('{', json_start)
+                    if brace_start != -1:
+                        brace_count = 0
+                        json_end = brace_start
+                        for i, char in enumerate(script_text[brace_start:]):
+                            if char == '{':
+                                brace_count += 1
+                            elif char == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    json_end = brace_start + i + 1
+                                    break
+                        json_str = script_text[brace_start:json_end]
+                        try:
+                            data = json.loads(json_str)
+                            total_chapters = int(data.get('count_all', 0))
+                            if total_chapters > 0:
+                                logger.info(
+                                    f"Ranobes: Got chapter count from JavaScript data: {total_chapters}"
+                                )
+                                return total_chapters
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"JSON parse error: {e}")
 
             # If no JSON count, fall back to HTML link parsing (chapters page then novel page)
             links = self._extract_ranobes_links_from_soup(soup)
