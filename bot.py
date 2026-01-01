@@ -2783,7 +2783,7 @@ Use `\\n` for new lines when using /edit command."""
                 "  Type a title (e.g., `Global Lord`)\n\n"
                 "🔗 **Option 2: Direct Link**\n"
                 "  Paste a URL from any supported site\n\n"
-                "📚 **Supported:** Novels + Manga\n"
+                "📚 **Supported:** Novels\n"
                 "⏹️  Type `cancel` anytime to stop")
             return
 
