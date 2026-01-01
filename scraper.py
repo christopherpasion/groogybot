@@ -222,13 +222,46 @@ class Scraper:
                     site_errors.append(f"{site_name}: {str(e)[:50]}")
                     logger.error(f"{site_name} search error: {e}")
 
-        # Deduplicate by URL
-        seen = set()
+        # Clean and deduplicate results
         unique_results = []
+        seen_urls = set()
+        seen_titles = set()  # Also dedupe by normalized title
+        
         for r in results:
-            if r['url'] not in seen:
-                unique_results.append(r)
-                seen.add(r['url'])
+            url = r.get('url', '')
+            title = r.get('title', '')
+            
+            # Skip empty results
+            if not url or not title:
+                continue
+                
+            # Skip generic/bad titles
+            title_lower = title.lower().strip()
+            if title_lower in ['novel', 'manga', 'read online', '', 'untitled']:
+                continue
+            
+            # Clean title: remove trailing numbers (IDs), MTL prefix
+            clean_title = re.sub(r'\s+\d{4,}$', '', title)  # Remove trailing IDs like " 118044"
+            clean_title = re.sub(r'^Mtl\s+', '', clean_title, flags=re.IGNORECASE)  # Remove "Mtl " prefix
+            clean_title = clean_title.strip()
+            r['title'] = clean_title if clean_title else title
+            
+            # Normalize for deduplication (lowercase, no special chars)
+            normalized_title = re.sub(r'[^a-z0-9]', '', clean_title.lower())
+            
+            # Skip if URL already seen
+            if url in seen_urls:
+                continue
+            
+            # Skip if same title from same domain type (avoid duplicates)
+            domain = urlparse(url).netloc.replace('www.', '')
+            title_key = f"{normalized_title}_{domain.split('.')[0]}"
+            if title_key in seen_titles:
+                continue
+            
+            seen_urls.add(url)
+            seen_titles.add(title_key)
+            unique_results.append(r)
 
         # Cache results for future use (reduces requests and IP blocking)
         if use_cache and CACHE_AVAILABLE and unique_results:
@@ -976,6 +1009,9 @@ class Scraper:
             for item in items[:5]:
                 href = item.get('href', '')
                 title = item.get('title') or item.get_text(strip=True)
+                # Skip empty/generic titles
+                if not title or title.lower() in ['novel', 'manga', 'read', '']:
+                    continue
                 if title and href:
                     results.append({'title': title, 'url': href, 'source': 'YongLibrary'})
             return results
