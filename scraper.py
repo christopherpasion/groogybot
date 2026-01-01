@@ -1422,8 +1422,22 @@ class Scraper:
             soup = BeautifulSoup(resp.content, 'html.parser')
             dle_content = soup.find("div", id="dle-content")
             if not dle_content:
-                logger.warning(f"No div#dle-content found")
-                return None
+                # Debug: check what divs actually exist
+                all_divs = soup.find_all("div", id=True)[:10]  # First 10 divs with IDs
+                div_ids = [div.get('id') for div in all_divs]
+                logger.warning(f"No div#dle-content found. Available div IDs: {div_ids}")
+                
+                # Try alternative selectors
+                dle_content = (soup.find("div", class_="dle-content") or 
+                             soup.find("main") or 
+                             soup.find("article") or
+                             soup.find("div", class_="content"))
+                
+                if not dle_content:
+                    logger.error(f"No content container found at all")
+                    return None
+                else:
+                    logger.info(f"Using alternative content container: {dle_content.name}.{dle_content.get('class', [])} #{dle_content.get('id', '')}")
 
             script_tag = dle_content.find("script")
             if not script_tag or not script_tag.string:
@@ -1984,10 +1998,27 @@ class Scraper:
         """Your original JSON extraction logic, moved to a helper function"""
         try:
             dle_content = soup.find("div", id="dle-content")
-            if not dle_content: return []
+            if not dle_content:
+                # Try alternative selectors
+                dle_content = (soup.find("div", class_="dle-content") or 
+                             soup.find("main") or 
+                             soup.find("article") or
+                             soup.find("div", class_="content"))
+                if not dle_content:
+                    return []
 
             script_tag = dle_content.find("script")
-            if not script_tag or not script_tag.string: return []
+            if not script_tag or not script_tag.string: 
+                # Debug: check if script is anywhere else
+                all_scripts = soup.find_all("script")
+                for script in all_scripts:
+                    if script.string and 'window.__DATA__' in script.string:
+                        script_tag = script
+                        logger.debug("Found __DATA__ script outside dle-content")
+                        break
+                
+                if not script_tag or not script_tag.string:
+                    return []
 
             import json
             json_match = re.search(r'window\.__DATA__\s*=\s*(\{.*\})',
