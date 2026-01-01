@@ -1564,18 +1564,21 @@ class Scraper:
             # Try to locate __DATA__ scripts anywhere on the page
             script_tag = None
             all_scripts = soup.find_all("script")
-            logger.debug(f"[RANOBES] Found {len(all_scripts)} script tags on page")
+            logger.info(f"[RANOBES] Found {len(all_scripts)} script tags on page")
+            scripts_with_content = 0
             for i, script in enumerate(all_scripts):
                 txt = (script.string or script.get_text() or "").strip()
                 if not txt:
                     continue
-                # Log first 100 chars of each script for debugging
+                scripts_with_content += 1
+                # Log first 200 chars of each script for debugging
                 if 'DATA' in txt or 'chapters' in txt.lower() or 'count' in txt.lower():
                     logger.info(f"[RANOBES] Script {i} contains potential data: {txt[:200]}...")
                 if 'window.__DATA__' in txt:
                     script_tag = script
                     logger.info(f"[RANOBES] Found window.__DATA__ in script {i}")
                     break
+            logger.info(f"[RANOBES] Scripts with content: {scripts_with_content}/{len(all_scripts)}")
 
             if script_tag:
                 import json
