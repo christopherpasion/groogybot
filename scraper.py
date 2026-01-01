@@ -1517,11 +1517,27 @@ class Scraper:
             base_chapters_url = f"https://ranobes.net/chapters/{novel_id}/"
 
             resp = self._get_with_retry(base_chapters_url, rotate_on_block=True, rotate_per_attempt=True)
+            html_content = None
+            
             if not resp:
-                logger.warning(f"Failed to fetch chapters page for count")
-                return None
-
-            soup = BeautifulSoup(resp.content, 'html.parser')
+                # Fallback to Playwright if regular requests fail
+                logger.info(f"[RANOBES] Regular fetch failed for chapter count, trying Playwright: {base_chapters_url}")
+                try:
+                    from playwright_scraper import get_scraper_instance, run_in_pw_loop
+                    pw_scraper = get_scraper_instance()
+                    html_content = run_in_pw_loop(pw_scraper.get_page_content(base_chapters_url))
+                    if not html_content:
+                        logger.warning(f"[RANOBES] Playwright also failed for chapter count")
+                        return None
+                    logger.info(f"[RANOBES] Playwright succeeded for chapter count page")
+                except Exception as pw_err:
+                    logger.error(f"[RANOBES] Playwright error for chapter count: {pw_err}")
+                    return None
+            
+            if html_content:
+                soup = BeautifulSoup(html_content, 'html.parser')
+            else:
+                soup = BeautifulSoup(resp.content, 'html.parser')
             dle_content = soup.find("div", id="dle-content")
             if not dle_content:
                 # Debug: check what divs actually exist
@@ -1596,8 +1612,21 @@ class Scraper:
 
             if not links:
                 novel_resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
+                novel_soup = None
                 if novel_resp:
                     novel_soup = BeautifulSoup(novel_resp.content, 'html.parser')
+                else:
+                    # Fallback to Playwright for novel page
+                    try:
+                        from playwright_scraper import get_scraper_instance, run_in_pw_loop
+                        pw_scraper = get_scraper_instance()
+                        novel_html = run_in_pw_loop(pw_scraper.get_page_content(url))
+                        if novel_html:
+                            novel_soup = BeautifulSoup(novel_html, 'html.parser')
+                    except Exception as pw_err:
+                        logger.warning(f"Playwright fallback failed for novel page: {pw_err}")
+                
+                if novel_soup:
                     links = self._extract_ranobes_latest_block(novel_soup, url)
                     if not links:
                         links = self._extract_ranobes_links_html_fallback(novel_soup, novel_id, slug)
@@ -1681,14 +1710,35 @@ class Scraper:
             logger.info(f"Fetching Ranobes metadata for {url}")
 
             resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
+            html_content = None
+            
             if not resp:
-                return {
-                    'title': 'Unknown',
-                    'total_chapters': 500,
-                    'error': 'Failed to fetch URL'
-                }
-
-            soup = BeautifulSoup(resp.content, 'html.parser')
+                # Fallback to Playwright if regular requests fail
+                logger.info(f"[RANOBES] Regular fetch failed, trying Playwright for metadata: {url}")
+                try:
+                    from playwright_scraper import get_scraper_instance, run_in_pw_loop
+                    pw_scraper = get_scraper_instance()
+                    html_content = run_in_pw_loop(pw_scraper.get_page_content(url))
+                    if not html_content:
+                        logger.error(f"[RANOBES] Playwright also failed for metadata: {url}")
+                        return {
+                            'title': 'Unknown',
+                            'total_chapters': 500,
+                            'error': 'Failed to fetch URL'
+                        }
+                    logger.info(f"[RANOBES] Playwright succeeded for metadata: {url}")
+                except Exception as pw_err:
+                    logger.error(f"[RANOBES] Playwright error for metadata: {pw_err}")
+                    return {
+                        'title': 'Unknown',
+                        'total_chapters': 500,
+                        'error': 'Failed to fetch URL'
+                    }
+            
+            if html_content:
+                soup = BeautifulSoup(html_content, 'html.parser')
+            else:
+                soup = BeautifulSoup(resp.content, 'html.parser')
             title = self._extract_title(soup, url)
             count = self._count_ranobes_chapters(url) or 500
 
