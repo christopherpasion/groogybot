@@ -386,25 +386,23 @@ class PlaywrightScraper:
     async def get_page_content(self, url: str, wait_selector: Optional[str] = None, timeout: int = 30000) -> Tuple[str, str]:
         context = await self._ensure_browser()
         page = await context.new_page()
-        
         try:
             await apply_stealth(page)
-            
+            # Log User-Agent and cookies before navigation
+            ua = await page.evaluate("navigator.userAgent")
+            cookies = await context.cookies()
+            logger.info(f"[Playwright] User-Agent: {ua}")
+            logger.info(f"[Playwright] Cookies: {cookies}")
             await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
-            
             if wait_selector:
                 try:
                     await page.wait_for_selector(wait_selector, timeout=10000)
                 except:
                     pass
-            
             await asyncio.sleep(random.uniform(0.5, 1.5))
-            
             content = await page.content()
             title = await page.title()
-            
             return content, title
-            
         except Exception as e:
             logger.error(f"Playwright error fetching {url}: {e}")
             raise

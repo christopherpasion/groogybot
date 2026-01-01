@@ -1894,20 +1894,77 @@ class Scraper:
                 self.link_progress_callback(0, 0, 'collecting')
 
             chapter_links = []
-            if 'ranobes' in url:
-                chapter_links = self._get_ranobes_chapter_links(url)
+            # --- Unified protected site logic ---
+            protected_sites = ['ranobes', 'novelbin', 'lightnovelworld', 'qidian', 'webnovel']
+            site = next((s for s in protected_sites if s in url), None)
+            chapter_links = []
+            if site:
+                import time, random
+                # Lower parallelism for protected sites
+                self.parallel_workers = min(self.parallel_workers, 2)
+                logger.info(f"[SCRAPER] Using reduced parallelism ({self.parallel_workers}) for protected site: {site}")
+                # Add random delay before any protected site chapter list request
+                delay = random.uniform(1.5, 3.5)
+                logger.info(f"[SCRAPER] Sleeping for {delay:.2f}s before fetching chapter list for {site}")
+                time.sleep(delay)
+                # Try normal requests first
+                resp = self._get_with_retry(url, rotate_on_block=True)
+                if resp:
+                    logger.info(f"[SCRAPER] {site}: Got chapter list page with requests. User-Agent: {self.session.headers.get('User-Agent')}, Cookies: {self.session.cookies.get_dict()}")
+                    soup = BeautifulSoup(resp.content, 'html.parser')
+                    chapter_links = self._get_chapter_links_from_html(soup, url)
+                # If blocked or no links, try Playwright
+                if (not chapter_links or len(chapter_links) < 5) and self.use_playwright:
+                    logger.info(f"[SCRAPER] {site}: Falling back to Playwright for chapter list page.")
+                    try:
+                        from playwright_scraper import get_scraper_instance, run_in_pw_loop
+                        pw_scraper = get_scraper_instance()
+                        logger.info(f"[Playwright] Launching browser for {url}")
+                        html, _ = run_in_pw_loop(pw_scraper.get_page_content(url))
+                        logger.info(f"[Playwright] Got HTML for {url}")
+                        soup = BeautifulSoup(html, 'html.parser')
+                        chapter_links = self._get_chapter_links_from_html(soup, url)
+                    except Exception as e:
+                        logger.warning(f"[Playwright] Failed to fetch chapter list for {url}: {e}")
+                # If still not enough links, enumerate paginated chapter lists with Playwright
+                if (not chapter_links or len(chapter_links) < 5) and self.use_playwright:
+                    logger.info(f"[SCRAPER] {site}: Attempting paginated chapter list enumeration with Playwright.")
+                    try:
+                        from playwright_scraper import get_scraper_instance, run_in_pw_loop
+                        pw_scraper = get_scraper_instance()
+                        paginated_links = []
+                        page_num = 1
+                        while True:
+                            page_url = url.rstrip('/') + f'/page/{page_num}/'
+                            delay = random.uniform(1.5, 3.5)
+                            logger.info(f"[Playwright] Sleeping for {delay:.2f}s before fetching {page_url}")
+                            time.sleep(delay)
+                            html, _ = run_in_pw_loop(pw_scraper.get_page_content(page_url))
+                            if not html or 'Cloudflare' in html or 'checking your browser' in html:
+                                logger.info(f"[Playwright] Cloudflare or empty page at {page_url}, stopping pagination.")
+                                break
+                            soup = BeautifulSoup(html, 'html.parser')
+                            links = self._get_chapter_links_from_html(soup, url)
+                            if not links:
+                                logger.info(f"[Playwright] No chapter links found at {page_url}, stopping pagination.")
+                                break
+                            paginated_links.extend(links)
+                            logger.info(f"[Playwright] Found {len(links)} chapter links on page {page_num}.")
+                            page_num += 1
+                        if paginated_links:
+                            chapter_links = paginated_links
+                    except Exception as e:
+                        logger.warning(f"[Playwright] Pagination failed for {url}: {e}")
             else:
                 resp = self._get_with_retry(url, rotate_on_block=True)
                 if resp:
                     soup = BeautifulSoup(resp.content, 'html.parser')
-                    chapter_links = self._get_chapter_links_from_html(
-                        soup, url)
+                    chapter_links = self._get_chapter_links_from_html(soup, url)
                 elif self.use_playwright and 'novelbin' in url:
                     html = self._browser_fetch_html(url)
                     if html:
                         soup = BeautifulSoup(html, 'html.parser')
-                        chapter_links = self._get_chapter_links_from_html(
-                            soup, url)
+                        chapter_links = self._get_chapter_links_from_html(soup, url)
 
             # Log what we collected so far
             logger.info(
@@ -2179,73 +2236,67 @@ class Scraper:
                 rotate_on_block=True,
                 rotate_per_attempt=True,
             )
-            if not resp: return []
-
-            soup = BeautifulSoup(resp.content, 'html.parser')
+            soup = BeautifulSoup(resp.content, 'html.parser') if resp else None
 
             # 3. Extract JSON Data for precise calculation
-            # We need the 'count_all' (Total Chapters) to know how many pages exist
             total_chapters = 0
             page_size = 0
+            all_links = []
+            if soup:
+                dle_content = soup.find("div", id="dle-content")
+                if dle_content:
+                    script_tag = dle_content.find("script")
+                    if script_tag and script_tag.string:
+                        import json
+                        json_match = re.search(r'window\.__DATA__\s*=\s*(\{.*\})',
+                                               script_tag.string, re.DOTALL)
+                        if json_match:
+                            try:
+                                data = json.loads(json_match.group(1))
+                                total_chapters = int(data.get('count_all', 0))
+                                current_page_chapters = data.get('chapters', [])
+                                page_size = len(current_page_chapters)
+                            except:
+                                pass
 
-            dle_content = soup.find("div", id="dle-content")
-            if dle_content:
-                script_tag = dle_content.find("script")
-                if script_tag and script_tag.string:
-                    import json
-                    json_match = re.search(r'window\.__DATA__\s*=\s*(\{.*\})',
-                                           script_tag.string, re.DOTALL)
-                    if json_match:
-                        try:
-                            data = json.loads(json_match.group(1))
-                            total_chapters = int(data.get('count_all', 0))
-                            current_page_chapters = data.get('chapters', [])
-                            page_size = len(current_page_chapters)
-                        except:
-                            pass
-
-            # 4. Get links from Page 1
-            all_links = self._extract_ranobes_links_from_soup(soup)
-            
-            # If no links found via JSON method, try HTML fallback
-            if not all_links:
-                logger.info("No links from JSON method, trying HTML fallback...")
-                all_links = self._extract_ranobes_links_html_fallback(soup, novel_id, slug)
-
-            # Try parsing the inline latest-chapters block (e.g., the novel page's "Last 25 chapters")
-            if not all_links:
-                latest = self._extract_ranobes_latest_block(soup, base_chapters_url)
-                if latest:
-                    logger.info(f"Ranobes latest-chapters block yielded {len(latest)} links")
-                    all_links.extend(latest)
-
-            # As a final attempt, pull the novel page itself and parse its latest-chapters block
-            if not all_links:
-                logger.info("Ranobes: Trying novel page latest-chapters block")
-                novel_resp = self._get_with_retry(
-                    url,
-                    rotate_on_block=True,
-                    rotate_per_attempt=True,
-                )
-                if novel_resp:
-                    novel_soup = BeautifulSoup(novel_resp.content, 'html.parser')
-                    latest = self._extract_ranobes_latest_block(novel_soup, url)
+                # 4. Get links from Page 1
+                all_links = self._extract_ranobes_links_from_soup(soup)
+                # If no links found via JSON method, try HTML fallback
+                if not all_links:
+                    logger.info("No links from JSON method, trying HTML fallback...")
+                    all_links = self._extract_ranobes_links_html_fallback(soup, novel_id, slug)
+                # Try parsing the inline latest-chapters block (e.g., the novel page's "Last 25 chapters")
+                if not all_links:
+                    latest = self._extract_ranobes_latest_block(soup, base_chapters_url)
                     if latest:
-                        logger.info(f"Ranobes novel page latest-chapters block yielded {len(latest)} links")
+                        logger.info(f"Ranobes latest-chapters block yielded {len(latest)} links")
                         all_links.extend(latest)
-                    # Also try HTML fallback selectors against the novel page
-                    if not all_links:
-                        logger.info("Ranobes: Trying novel page HTML fallback selectors")
-                        novel_html_links = self._extract_ranobes_links_html_fallback(novel_soup, novel_id, slug)
-                        if novel_html_links:
-                            logger.info(f"Ranobes novel page HTML fallback yielded {len(novel_html_links)} links")
-                            all_links.extend(novel_html_links)
+                # As a final attempt, pull the novel page itself and parse its latest-chapters block
+                if not all_links:
+                    logger.info("Ranobes: Trying novel page latest-chapters block")
+                    novel_resp = self._get_with_retry(
+                        url,
+                        rotate_on_block=True,
+                        rotate_per_attempt=True,
+                    )
+                    if novel_resp:
+                        novel_soup = BeautifulSoup(novel_resp.content, 'html.parser')
+                        latest = self._extract_ranobes_latest_block(novel_soup, url)
+                        if latest:
+                            logger.info(f"Ranobes novel page latest-chapters block yielded {len(latest)} links")
+                            all_links.extend(latest)
+                        # Also try HTML fallback selectors against the novel page
+                        if not all_links:
+                            logger.info("Ranobes: Trying novel page HTML fallback selectors")
+                            novel_html_links = self._extract_ranobes_links_html_fallback(novel_soup, novel_id, slug)
+                            if novel_html_links:
+                                logger.info(f"Ranobes novel page HTML fallback yielded {len(novel_html_links)} links")
+                                all_links.extend(novel_html_links)
 
             # If we couldn't read the page size, assume standard 10 or just use what we found
             if page_size == 0: page_size = max(len(all_links), 10)
 
             # 5. Calculate Total Pages
-            # Example: 157 total / 24 per page = 6.54 -> ceil -> 7 pages
             if total_chapters > 0:
                 max_page = math.ceil(total_chapters / page_size)
                 logger.info(
@@ -2254,28 +2305,29 @@ class Scraper:
             else:
                 # Fallback to visual check if JSON failed
                 max_page = 1
-                pagination = soup.select(
-                    '.pages a, .navigation a, .pagination a')
-                for link in pagination:
-                    try:
-                        num = int(link.get_text(strip=True))
-                        if num > max_page: max_page = num
-                    except:
-                        pass
-                logger.info(f"Visual Calculation: Found {max_page} pages")
+                if soup:
+                    pagination = soup.select(
+                        '.pages a, .navigation a, .pagination a')
+                    for link in pagination:
+                        try:
+                            num = int(link.get_text(strip=True))
+                            if num > max_page: max_page = num
+                        except:
+                            pass
+                    logger.info(f"Visual Calculation: Found {max_page} pages")
 
-            if max_page <= 1:
+            # If we have enough links, return them
+            if max_page <= 1 and all_links:
                 return all_links
 
-            # 6. Parallel Fetch Pages 2 to Max
+            # 6. Parallel Fetch Pages 2 to Max (requests-based)
             page_urls = [
-                f"{base_chapters_url}page/{p}/"
+                f"https://ranobes.net/chapters/{novel_id}/page/{p}/"
                 for p in range(2, max_page + 1)
             ]
             logger.info(
                 f"Parallel fetching {len(page_urls)} additional pages...")
 
-            # Use fewer workers for page fetching to avoid rate limits
             with ThreadPoolExecutor(max_workers=3) as executor:
                 future_to_url = {
                     executor.submit(self._fetch_ranobes_page_links, u): u
@@ -2298,21 +2350,58 @@ class Scraper:
                 if not link:
                     continue
                 norm = link.rstrip('/')
-                # Skip the novel page itself
                 if norm == base_url:
                     continue
-                # Keep .html chapter-like links
                 if norm.endswith('.html'):
                     filtered.append(link)
                     continue
-                # Keep links containing the novel id (even without .html) as a last resort
                 if novel_id in norm:
                     filtered.append(link)
-            if not filtered:
-                logger.error("Ranobes: No chapter links found after filtering; failing scrape")
-                return []
-            return filtered
+            if filtered:
+                return filtered
 
+            # --- Playwright fallback if all else fails ---
+            if self.use_playwright:
+                logger.info("[Ranobes] All requests-based methods failed, trying Playwright fallback for chapter links.")
+                try:
+                    from playwright_scraper import get_scraper_instance, run_in_pw_loop
+                    import time, random
+                    pw_scraper = get_scraper_instance()
+                    html, _ = run_in_pw_loop(pw_scraper.get_page_content(base_chapters_url))
+                    if html:
+                        soup = BeautifulSoup(html, 'html.parser')
+                        links = self._extract_ranobes_links_from_soup(soup)
+                        if not links:
+                            links = self._extract_ranobes_links_html_fallback(soup, novel_id, slug)
+                        if links:
+                            logger.info(f"[Ranobes] Playwright fallback found {len(links)} chapter links on main chapters page.")
+                            return links
+                        # Try paginated Playwright fetches
+                        paginated_links = []
+                        for page_num in range(2, max_page + 1):
+                            page_url = f"https://ranobes.net/chapters/{novel_id}/page/{page_num}/"
+                            delay = random.uniform(1.5, 3.5)
+                            logger.info(f"[Playwright] Sleeping for {delay:.2f}s before fetching {page_url}")
+                            time.sleep(delay)
+                            html, _ = run_in_pw_loop(pw_scraper.get_page_content(page_url))
+                            if not html or 'Cloudflare' in html or 'checking your browser' in html:
+                                logger.info(f"[Playwright] Cloudflare or empty page at {page_url}, stopping pagination.")
+                                break
+                            soup = BeautifulSoup(html, 'html.parser')
+                            links = self._extract_ranobes_links_from_soup(soup)
+                            if not links:
+                                logger.info(f"[Playwright] No chapter links found at {page_url}, stopping pagination.")
+                                break
+                            paginated_links.extend(links)
+                            logger.info(f"[Playwright] Found {len(links)} chapter links on page {page_num}.")
+                        if paginated_links:
+                            logger.info(f"[Ranobes] Playwright fallback found {len(paginated_links)} chapter links from paginated pages.")
+                            return paginated_links
+                except Exception as e:
+                    logger.warning(f"[Ranobes] Playwright fallback failed: {e}")
+
+            logger.error("Ranobes: No chapter links found after all fallback methods; failing scrape")
+            return []
         except Exception as e:
             logger.error(f"Error getting Ranobes links: {e}")
             return []
