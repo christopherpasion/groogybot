@@ -1525,7 +1525,9 @@ class Scraper:
                 try:
                     from playwright_scraper import get_scraper_instance, run_in_pw_loop
                     pw_scraper = get_scraper_instance()
-                    html_content = run_in_pw_loop(pw_scraper.get_page_content(base_chapters_url))
+                    result = run_in_pw_loop(pw_scraper.get_page_content(base_chapters_url))
+                    # get_page_content returns (content, title) tuple
+                    html_content = result[0] if result else None
                     if not html_content:
                         logger.warning(f"[RANOBES] Playwright also failed for chapter count")
                         return None
@@ -1620,7 +1622,9 @@ class Scraper:
                     try:
                         from playwright_scraper import get_scraper_instance, run_in_pw_loop
                         pw_scraper = get_scraper_instance()
-                        novel_html = run_in_pw_loop(pw_scraper.get_page_content(url))
+                        result = run_in_pw_loop(pw_scraper.get_page_content(url))
+                        # get_page_content returns (content, title) tuple
+                        novel_html = result[0] if result else None
                         if novel_html:
                             novel_soup = BeautifulSoup(novel_html, 'html.parser')
                     except Exception as pw_err:
@@ -1718,7 +1722,9 @@ class Scraper:
                 try:
                     from playwright_scraper import get_scraper_instance, run_in_pw_loop
                     pw_scraper = get_scraper_instance()
-                    html_content = run_in_pw_loop(pw_scraper.get_page_content(url))
+                    result = run_in_pw_loop(pw_scraper.get_page_content(url))
+                    # get_page_content returns (content, title) tuple
+                    html_content = result[0] if result else None
                     if not html_content:
                         logger.error(f"[RANOBES] Playwright also failed for metadata: {url}")
                         return {
