@@ -1894,77 +1894,82 @@ class Scraper:
                 self.link_progress_callback(0, 0, 'collecting')
 
             chapter_links = []
-            # --- Unified protected site logic ---
-            protected_sites = ['ranobes', 'novelbin', 'lightnovelworld', 'qidian', 'webnovel']
-            site = next((s for s in protected_sites if s in url), None)
-            chapter_links = []
-            if site:
-                import time, random
-                # Lower parallelism for protected sites
-                self.parallel_workers = min(self.parallel_workers, 2)
-                logger.info(f"[SCRAPER] Using reduced parallelism ({self.parallel_workers}) for protected site: {site}")
-                # Add random delay before any protected site chapter list request
-                delay = random.uniform(1.5, 3.5)
-                logger.info(f"[SCRAPER] Sleeping for {delay:.2f}s before fetching chapter list for {site}")
-                time.sleep(delay)
-                # Try normal requests first
-                resp = self._get_with_retry(url, rotate_on_block=True)
-                if resp:
-                    logger.info(f"[SCRAPER] {site}: Got chapter list page with requests. User-Agent: {self.session.headers.get('User-Agent')}, Cookies: {self.session.cookies.get_dict()}")
-                    soup = BeautifulSoup(resp.content, 'html.parser')
-                    chapter_links = self._get_chapter_links_from_html(soup, url)
-                # If blocked or no links, try Playwright
-                if (not chapter_links or len(chapter_links) < 5) and self.use_playwright:
-                    logger.info(f"[SCRAPER] {site}: Falling back to Playwright for chapter list page.")
-                    try:
-                        from playwright_scraper import get_scraper_instance, run_in_pw_loop
-                        pw_scraper = get_scraper_instance()
-                        logger.info(f"[Playwright] Launching browser for {url}")
-                        html, _ = run_in_pw_loop(pw_scraper.get_page_content(url))
-                        logger.info(f"[Playwright] Got HTML for {url}")
-                        soup = BeautifulSoup(html, 'html.parser')
-                        chapter_links = self._get_chapter_links_from_html(soup, url)
-                    except Exception as e:
-                        logger.warning(f"[Playwright] Failed to fetch chapter list for {url}: {e}")
-                # If still not enough links, enumerate paginated chapter lists with Playwright
-                if (not chapter_links or len(chapter_links) < 5) and self.use_playwright:
-                    logger.info(f"[SCRAPER] {site}: Attempting paginated chapter list enumeration with Playwright.")
-                    try:
-                        from playwright_scraper import get_scraper_instance, run_in_pw_loop
-                        pw_scraper = get_scraper_instance()
-                        paginated_links = []
-                        page_num = 1
-                        while True:
-                            page_url = url.rstrip('/') + f'/page/{page_num}/'
-                            delay = random.uniform(1.5, 3.5)
-                            logger.info(f"[Playwright] Sleeping for {delay:.2f}s before fetching {page_url}")
-                            time.sleep(delay)
-                            html, _ = run_in_pw_loop(pw_scraper.get_page_content(page_url))
-                            if not html or 'Cloudflare' in html or 'checking your browser' in html:
-                                logger.info(f"[Playwright] Cloudflare or empty page at {page_url}, stopping pagination.")
-                                break
-                            soup = BeautifulSoup(html, 'html.parser')
-                            links = self._get_chapter_links_from_html(soup, url)
-                            if not links:
-                                logger.info(f"[Playwright] No chapter links found at {page_url}, stopping pagination.")
-                                break
-                            paginated_links.extend(links)
-                            logger.info(f"[Playwright] Found {len(links)} chapter links on page {page_num}.")
-                            page_num += 1
-                        if paginated_links:
-                            chapter_links = paginated_links
-                    except Exception as e:
-                        logger.warning(f"[Playwright] Pagination failed for {url}: {e}")
+            
+            # Ranobes has its own specialized chapter link extraction - use it directly
+            if 'ranobes' in url:
+                chapter_links = self._get_ranobes_chapter_links(url)
             else:
-                resp = self._get_with_retry(url, rotate_on_block=True)
-                if resp:
-                    soup = BeautifulSoup(resp.content, 'html.parser')
-                    chapter_links = self._get_chapter_links_from_html(soup, url)
-                elif self.use_playwright and 'novelbin' in url:
-                    html = self._browser_fetch_html(url)
-                    if html:
-                        soup = BeautifulSoup(html, 'html.parser')
+                # --- Protected site logic for other sites ---
+                protected_sites = ['novelbin', 'lightnovelworld', 'qidian', 'webnovel']
+                site = next((s for s in protected_sites if s in url), None)
+                if site:
+                    import time, random
+                    # Lower parallelism for protected sites
+                    self.parallel_workers = min(self.parallel_workers, 2)
+                    logger.info(f"[SCRAPER] Using reduced parallelism ({self.parallel_workers}) for protected site: {site}")
+                    # Add random delay before any protected site chapter list request
+                    delay = random.uniform(1.5, 3.5)
+                    logger.info(f"[SCRAPER] Sleeping for {delay:.2f}s before fetching chapter list for {site}")
+                    time.sleep(delay)
+                    # Try normal requests first
+                    resp = self._get_with_retry(url, rotate_on_block=True)
+                    if resp:
+                        logger.info(f"[SCRAPER] {site}: Got chapter list page with requests. User-Agent: {self.session.headers.get('User-Agent')}, Cookies: {self.session.cookies.get_dict()}")
+                        soup = BeautifulSoup(resp.content, 'html.parser')
                         chapter_links = self._get_chapter_links_from_html(soup, url)
+                    # If blocked or no links, try Playwright
+                    if (not chapter_links or len(chapter_links) < 5) and self.use_playwright:
+                        logger.info(f"[SCRAPER] {site}: Falling back to Playwright for chapter list page.")
+                        try:
+                            from playwright_scraper import get_scraper_instance, run_in_pw_loop
+                            pw_scraper = get_scraper_instance()
+                            logger.info(f"[Playwright] Launching browser for {url}")
+                            html, _ = run_in_pw_loop(pw_scraper.get_page_content(url))
+                            logger.info(f"[Playwright] Got HTML for {url}")
+                            soup = BeautifulSoup(html, 'html.parser')
+                            chapter_links = self._get_chapter_links_from_html(soup, url)
+                        except Exception as e:
+                            logger.warning(f"[Playwright] Failed to fetch chapter list for {url}: {e}")
+                    # If still not enough links, enumerate paginated chapter lists with Playwright
+                    if (not chapter_links or len(chapter_links) < 5) and self.use_playwright:
+                        logger.info(f"[SCRAPER] {site}: Attempting paginated chapter list enumeration with Playwright.")
+                        try:
+                            from playwright_scraper import get_scraper_instance, run_in_pw_loop
+                            pw_scraper = get_scraper_instance()
+                            paginated_links = []
+                            page_num = 1
+                            while True:
+                                page_url = url.rstrip('/') + f'/page/{page_num}/'
+                                delay = random.uniform(1.5, 3.5)
+                                logger.info(f"[Playwright] Sleeping for {delay:.2f}s before fetching {page_url}")
+                                time.sleep(delay)
+                                html, _ = run_in_pw_loop(pw_scraper.get_page_content(page_url))
+                                if not html or 'Cloudflare' in html or 'checking your browser' in html:
+                                    logger.info(f"[Playwright] Cloudflare or empty page at {page_url}, stopping pagination.")
+                                    break
+                                soup = BeautifulSoup(html, 'html.parser')
+                                links = self._get_chapter_links_from_html(soup, url)
+                                if not links:
+                                    logger.info(f"[Playwright] No chapter links found at {page_url}, stopping pagination.")
+                                    break
+                                paginated_links.extend(links)
+                                logger.info(f"[Playwright] Found {len(links)} chapter links on page {page_num}.")
+                                page_num += 1
+                            if paginated_links:
+                                chapter_links = paginated_links
+                        except Exception as e:
+                            logger.warning(f"[Playwright] Pagination failed for {url}: {e}")
+                else:
+                    # Non-protected sites - use simple requests
+                    resp = self._get_with_retry(url, rotate_on_block=True)
+                    if resp:
+                        soup = BeautifulSoup(resp.content, 'html.parser')
+                        chapter_links = self._get_chapter_links_from_html(soup, url)
+                    elif self.use_playwright and 'novelbin' in url:
+                        html = self._browser_fetch_html(url)
+                        if html:
+                            soup = BeautifulSoup(html, 'html.parser')
+                            chapter_links = self._get_chapter_links_from_html(soup, url)
 
             # Log what we collected so far
             logger.info(
@@ -2248,16 +2253,33 @@ class Scraper:
                     script_tag = dle_content.find("script")
                     if script_tag and script_tag.string:
                         import json
-                        json_match = re.search(r'window\.__DATA__\s*=\s*(\{.*\})',
-                                               script_tag.string, re.DOTALL)
-                        if json_match:
-                            try:
-                                data = json.loads(json_match.group(1))
-                                total_chapters = int(data.get('count_all', 0))
-                                current_page_chapters = data.get('chapters', [])
-                                page_size = len(current_page_chapters)
-                            except:
-                                pass
+                        # Use a more robust JSON extraction - find the start and balance braces
+                        script_text = script_tag.string
+                        json_start = script_text.find('window.__DATA__')
+                        if json_start != -1:
+                            # Find the opening brace
+                            brace_start = script_text.find('{', json_start)
+                            if brace_start != -1:
+                                # Balance braces to find the complete JSON object
+                                brace_count = 0
+                                json_end = brace_start
+                                for i, char in enumerate(script_text[brace_start:]):
+                                    if char == '{':
+                                        brace_count += 1
+                                    elif char == '}':
+                                        brace_count -= 1
+                                        if brace_count == 0:
+                                            json_end = brace_start + i + 1
+                                            break
+                                json_str = script_text[brace_start:json_end]
+                                try:
+                                    data = json.loads(json_str)
+                                    total_chapters = int(data.get('count_all', 0))
+                                    current_page_chapters = data.get('chapters', [])
+                                    page_size = len(current_page_chapters)
+                                    logger.info(f"[Ranobes] JSON parsed: {total_chapters} total chapters, {page_size} on page 1")
+                                except json.JSONDecodeError as e:
+                                    logger.warning(f"JSON parse error: {e}")
 
                 # 4. Get links from Page 1
                 all_links = self._extract_ranobes_links_from_soup(soup)
@@ -2547,10 +2569,23 @@ class Scraper:
 
             target_json = None
             for txt in script_texts:
-                match = re.search(r'window\.__DATA__\s*=\s*(\{.*?\})\s*;?', txt, re.DOTALL)
-                if match:
-                    target_json = match.group(1)
-                    break
+                # Use brace balancing for robust JSON extraction
+                json_start = txt.find('window.__DATA__')
+                if json_start != -1:
+                    brace_start = txt.find('{', json_start)
+                    if brace_start != -1:
+                        brace_count = 0
+                        json_end = brace_start
+                        for i, char in enumerate(txt[brace_start:]):
+                            if char == '{':
+                                brace_count += 1
+                            elif char == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    json_end = brace_start + i + 1
+                                    break
+                        target_json = txt[brace_start:json_end]
+                        break
 
             if not target_json:
                 return []
