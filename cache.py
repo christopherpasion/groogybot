@@ -121,6 +121,40 @@ class NovelCache:
         except Exception as e:
             logger.warning(f"[Cache] Failed to save novel info: {e}")
     
+    # === Chapter Links Cache ===
+    
+    def get_chapter_links(self, novel_url: str) -> Optional[List[str]]:
+        """Get cached chapter links for a novel (cached for 24 hours)."""
+        cache_file = self.novels_dir / f"{self._url_hash(novel_url)}_links.json"
+        
+        if self._is_expired(cache_file, self.NOVEL_INFO_TTL):
+            return None
+        
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                links = data.get('links', [])
+                logger.info(f"[Cache] Chapter links hit: {len(links)} links for {novel_url[:50]}")
+                return links
+        except Exception:
+            return None
+    
+    def set_chapter_links(self, novel_url: str, links: List[str]):
+        """Cache chapter links for a novel."""
+        cache_file = self.novels_dir / f"{self._url_hash(novel_url)}_links.json"
+        
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'novel_url': novel_url,
+                    'cached_at': time.time(),
+                    'total_links': len(links),
+                    'links': links
+                }, f, ensure_ascii=False, indent=2)
+            logger.info(f"[Cache] Saved {len(links)} chapter links for {novel_url[:50]}")
+        except Exception as e:
+            logger.warning(f"[Cache] Failed to save chapter links: {e}")
+    
     def get_cached_chapters(self, novel_url: str) -> List[str]:
         """Get list of cached chapter URLs for a novel."""
         novel_hash = self._url_hash(novel_url)

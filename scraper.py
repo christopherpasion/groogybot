@@ -1178,6 +1178,13 @@ class Scraper:
         # FlareSolverr configuration for Cloudflare bypass
         self.flaresolverr_url = os.getenv('FLARESOLVERR_URL', 'http://localhost:8191/v1')
         self.flaresolverr_enabled = bool(os.getenv('FLARESOLVERR_URL', ''))
+        self.flaresolverr_session_id = None  # Session ID for reuse
+        self.flaresolverr_session_created = 0  # Timestamp of session creation
+        self.flaresolverr_session_ttl = 900  # 15 minutes session TTL
+        
+        # Sites that should use FlareSolverr as primary method (known Cloudflare protected)
+        self.flaresolverr_primary_sites = ['ranobes', 'novelbin', 'lightnovelworld']
+        
         if self.flaresolverr_enabled:
             logger.info(f"[SCRAPER] FlareSolverr enabled at {self.flaresolverr_url}")
         
@@ -2005,7 +2012,7 @@ class Scraper:
             
             # Ranobes has its own specialized chapter link extraction - use it directly
             if 'ranobes' in url:
-                chapter_links = self._get_ranobes_chapter_links(url)
+                chapter_links = self._get_ranobes_chapter_links(url, chapter_start, chapter_end, total_available)
             else:
                 # --- Protected site logic for other sites ---
                 protected_sites = ['novelbin', 'lightnovelworld', 'qidian', 'webnovel']
@@ -2333,12 +2340,26 @@ class Scraper:
         output.extend(normalized)
         return output
 
-    def _get_ranobes_chapter_links(self, url: str) -> List[str]:
-        """Extract all chapter links for Ranobes using mathematical page calculation"""
+    def _get_ranobes_chapter_links(self, url: str, chapter_start: int = 1, chapter_end: Optional[int] = None, total_chapters: int = 0) -> List[str]:
+        """Extract chapter links for Ranobes with smart page selection optimization.
+        
+        Optimizations:
+        1. Cache check: Returns cached links if available (24h TTL)
+        2. Smart page selection: Only fetches pages containing requested chapter range
+        3. FlareSolverr session reuse: Uses persistent session for faster requests
+        """
         try:
             import math
 
-            # 1. Setup ID and Base URL
+            # 1. Check cache first
+            if CACHE_AVAILABLE:
+                cache = get_cache()
+                cached_links = cache.get_chapter_links(url)
+                if cached_links:
+                    logger.info(f"[Ranobes] Using {len(cached_links)} cached chapter links")
+                    return cached_links
+
+            # 2. Setup ID and Base URL
             match = re.search(r'/novels/(\d+)', url)
             if not match: match = re.search(r'/chapters/(\d+)', url)
             if not match: return []
@@ -2348,7 +2369,7 @@ class Scraper:
             slug = slug_match.group(1).lower() if slug_match else None
             base_chapters_url = f"https://ranobes.net/chapters/{novel_id}/"
 
-            # 2. Fetch Page 1 to get the Data - try FlareSolverr first
+            # 3. Fetch Page 1 to get the Data - try FlareSolverr first
             logger.info(f"Fetching Page 1 data from {base_chapters_url}")
             html_content = None
             
@@ -2370,8 +2391,7 @@ class Scraper:
             
             soup = BeautifulSoup(html_content, 'html.parser') if html_content else None
 
-            # 3. Extract JSON Data for precise calculation
-            total_chapters = 0
+            # 4. Extract JSON Data for precise calculation
             page_size = 0
             all_links = []
             if soup:
@@ -2380,14 +2400,11 @@ class Scraper:
                     script_tag = dle_content.find("script")
                     if script_tag and script_tag.string:
                         import json
-                        # Use a more robust JSON extraction - find the start and balance braces
                         script_text = script_tag.string
                         json_start = script_text.find('window.__DATA__')
                         if json_start != -1:
-                            # Find the opening brace
                             brace_start = script_text.find('{', json_start)
                             if brace_start != -1:
-                                # Balance braces to find the complete JSON object
                                 brace_count = 0
                                 json_end = brace_start
                                 for i, char in enumerate(script_text[brace_start:]):
@@ -2401,94 +2418,99 @@ class Scraper:
                                 json_str = script_text[brace_start:json_end]
                                 try:
                                     data = json.loads(json_str)
-                                    total_chapters = int(data.get('count_all', 0))
+                                    json_total = int(data.get('count_all', 0))
+                                    if json_total > 0:
+                                        total_chapters = json_total
                                     current_page_chapters = data.get('chapters', [])
                                     page_size = len(current_page_chapters)
                                     logger.info(f"[Ranobes] JSON parsed: {total_chapters} total chapters, {page_size} on page 1")
                                 except json.JSONDecodeError as e:
                                     logger.warning(f"JSON parse error: {e}")
 
-                # 4. Get links from Page 1
+                # Get links from Page 1
                 all_links = self._extract_ranobes_links_from_soup(soup)
-                # If no links found via JSON method, try HTML fallback
                 if not all_links:
-                    logger.info("No links from JSON method, trying HTML fallback...")
                     all_links = self._extract_ranobes_links_html_fallback(soup, novel_id, slug)
-                # Try parsing the inline latest-chapters block (e.g., the novel page's "Last 25 chapters")
                 if not all_links:
                     latest = self._extract_ranobes_latest_block(soup, base_chapters_url)
                     if latest:
-                        logger.info(f"Ranobes latest-chapters block yielded {len(latest)} links")
                         all_links.extend(latest)
-                # As a final attempt, pull the novel page itself and parse its latest-chapters block
-                if not all_links:
-                    logger.info("Ranobes: Trying novel page latest-chapters block")
-                    novel_resp = self._get_with_retry(
-                        url,
-                        rotate_on_block=True,
-                        rotate_per_attempt=True,
-                    )
-                    if novel_resp:
-                        novel_soup = BeautifulSoup(novel_resp.content, 'html.parser')
-                        latest = self._extract_ranobes_latest_block(novel_soup, url)
-                        if latest:
-                            logger.info(f"Ranobes novel page latest-chapters block yielded {len(latest)} links")
-                            all_links.extend(latest)
-                        # Also try HTML fallback selectors against the novel page
-                        if not all_links:
-                            logger.info("Ranobes: Trying novel page HTML fallback selectors")
-                            novel_html_links = self._extract_ranobes_links_html_fallback(novel_soup, novel_id, slug)
-                            if novel_html_links:
-                                logger.info(f"Ranobes novel page HTML fallback yielded {len(novel_html_links)} links")
-                                all_links.extend(novel_html_links)
 
-            # If we couldn't read the page size, assume standard 10 or just use what we found
-            if page_size == 0: page_size = max(len(all_links), 10)
+            # If we couldn't read the page size, assume standard 25 (Ranobes default)
+            if page_size == 0: 
+                page_size = max(len(all_links), 25)
 
-            # 5. Calculate Total Pages
+            # 5. Calculate Total Pages and Smart Page Selection
             if total_chapters > 0:
                 max_page = math.ceil(total_chapters / page_size)
-                logger.info(
-                    f"Math Calculation: {total_chapters} total / {page_size} per page = {max_page} pages"
-                )
+                logger.info(f"[Ranobes] {total_chapters} total / {page_size} per page = {max_page} pages")
+                
+                # Smart page selection: calculate which pages we actually need
+                # Ranobes pagination: Page 1 = newest, Page N = oldest
+                # Chapter 1 is on the last page, Chapter N is on page 1
+                effective_end = chapter_end if chapter_end else total_chapters
+                
+                # Calculate page range needed (pages are numbered 1 to max_page)
+                # Page containing chapter X: max_page - floor((X - 1) / page_size)
+                page_for_start = max_page - math.floor((chapter_start - 1) / page_size)
+                page_for_end = max_page - math.floor((effective_end - 1) / page_size)
+                
+                # Pages to fetch (from lowest chapter's page to highest chapter's page)
+                start_page = min(page_for_start, page_for_end)
+                end_page = max(page_for_start, page_for_end)
+                
+                # Clamp to valid range
+                start_page = max(1, start_page)
+                end_page = min(max_page, end_page)
+                
+                pages_to_fetch = list(range(start_page, end_page + 1))
+                # Remove page 1 if we already have it
+                if 1 in pages_to_fetch:
+                    pages_to_fetch.remove(1)
+                
+                logger.info(f"[Ranobes] Smart page selection: Chapters {chapter_start}-{effective_end} are on pages {start_page}-{end_page}")
+                logger.info(f"[Ranobes] Fetching {len(pages_to_fetch)} additional pages instead of {max_page - 1} (saved {max_page - 1 - len(pages_to_fetch)} requests)")
             else:
-                # Fallback to visual check if JSON failed
+                # Fallback: try to determine pages from pagination
                 max_page = 1
+                pages_to_fetch = []
                 if soup:
-                    pagination = soup.select(
-                        '.pages a, .navigation a, .pagination a')
+                    pagination = soup.select('.pages a, .navigation a, .pagination a')
                     for link in pagination:
                         try:
                             num = int(link.get_text(strip=True))
                             if num > max_page: max_page = num
                         except:
                             pass
-                    logger.info(f"Visual Calculation: Found {max_page} pages")
+                    pages_to_fetch = list(range(2, max_page + 1))
+                    logger.info(f"[Ranobes] Visual pagination: {max_page} pages")
 
-            # If we have enough links, return them
-            if max_page <= 1 and all_links:
+            # If we only need page 1 and have links, return them
+            if not pages_to_fetch and all_links:
+                if CACHE_AVAILABLE:
+                    cache = get_cache()
+                    cache.set_chapter_links(url, all_links)
                 return all_links
 
-            # 6. Sequential Fetch Pages 2 to Max with delays to avoid rate limiting
+            # 6. Fetch required pages with delays
             import time, random
             failed_pages = []
-            logger.info(f"Fetching {max_page - 1} additional pages sequentially with delays...")
+            logger.info(f"[Ranobes] Fetching {len(pages_to_fetch)} pages: {pages_to_fetch}")
             
-            for p in range(2, max_page + 1):
+            for p in pages_to_fetch:
                 page_url = f"https://ranobes.net/chapters/{novel_id}/page/{p}/"
-                # Add random delay between requests to avoid Cloudflare
                 delay = random.uniform(1.0, 2.5)
                 time.sleep(delay)
                 
                 links = self._fetch_ranobes_page_links(page_url)
                 if links:
                     all_links.extend(links)
-                    logger.info(f"[Ranobes] Page {p}/{max_page}: Got {len(links)} links")
+                    logger.info(f"[Ranobes] Page {p}: Got {len(links)} links")
                 else:
                     failed_pages.append(page_url)
-                    logger.warning(f"[Ranobes] Page {p}/{max_page}: Failed to fetch")
+                    logger.warning(f"[Ranobes] Page {p}: Failed to fetch")
             
-            # Try Playwright for failed pages
+            # Retry failed pages with Playwright
             if failed_pages and self.use_playwright:
                 logger.info(f"[Ranobes] Retrying {len(failed_pages)} failed pages with Playwright...")
                 try:
@@ -2512,7 +2534,7 @@ class Scraper:
                 except Exception as e:
                     logger.warning(f"[Playwright] Fallback initialization failed: {e}")
 
-            logger.info(f"Total chapters collected: {len(all_links)}")
+            logger.info(f"[Ranobes] Total chapters collected: {len(all_links)}")
 
             # 7. Deduplicate and filter
             deduped = list(dict.fromkeys(all_links))
@@ -2529,12 +2551,17 @@ class Scraper:
                     continue
                 if novel_id in norm:
                     filtered.append(link)
+            
             if filtered:
+                # Cache the links for future use
+                if CACHE_AVAILABLE:
+                    cache = get_cache()
+                    cache.set_chapter_links(url, filtered)
                 return filtered
 
             # --- Playwright fallback if all else fails ---
             if self.use_playwright:
-                logger.info("[Ranobes] All requests-based methods failed, trying Playwright fallback for chapter links.")
+                logger.info("[Ranobes] All requests-based methods failed, trying Playwright fallback.")
                 try:
                     from playwright_scraper import get_scraper_instance, run_in_pw_loop
                     import time, random
@@ -2546,33 +2573,14 @@ class Scraper:
                         if not links:
                             links = self._extract_ranobes_links_html_fallback(soup, novel_id, slug)
                         if links:
-                            logger.info(f"[Ranobes] Playwright fallback found {len(links)} chapter links on main chapters page.")
+                            if CACHE_AVAILABLE:
+                                cache = get_cache()
+                                cache.set_chapter_links(url, links)
                             return links
-                        # Try paginated Playwright fetches
-                        paginated_links = []
-                        for page_num in range(2, max_page + 1):
-                            page_url = f"https://ranobes.net/chapters/{novel_id}/page/{page_num}/"
-                            delay = random.uniform(1.5, 3.5)
-                            logger.info(f"[Playwright] Sleeping for {delay:.2f}s before fetching {page_url}")
-                            time.sleep(delay)
-                            html, _ = run_in_pw_loop(pw_scraper.get_page_content(page_url))
-                            if not html or 'Cloudflare' in html or 'checking your browser' in html:
-                                logger.info(f"[Playwright] Cloudflare or empty page at {page_url}, stopping pagination.")
-                                break
-                            soup = BeautifulSoup(html, 'html.parser')
-                            links = self._extract_ranobes_links_from_soup(soup)
-                            if not links:
-                                logger.info(f"[Playwright] No chapter links found at {page_url}, stopping pagination.")
-                                break
-                            paginated_links.extend(links)
-                            logger.info(f"[Playwright] Found {len(links)} chapter links on page {page_num}.")
-                        if paginated_links:
-                            logger.info(f"[Ranobes] Playwright fallback found {len(paginated_links)} chapter links from paginated pages.")
-                            return paginated_links
                 except Exception as e:
                     logger.warning(f"[Ranobes] Playwright fallback failed: {e}")
 
-            logger.error("Ranobes: No chapter links found after all fallback methods; failing scrape")
+            logger.error("Ranobes: No chapter links found after all fallback methods")
             return []
         except Exception as e:
             logger.error(f"Error getting Ranobes links: {e}")
@@ -3155,8 +3163,83 @@ class Scraper:
             logger.error(f"Error downloading chapter {url}: {e}")
             return None
 
-    def _fetch_with_flaresolverr(self, url: str, max_timeout: int = 60000) -> Optional[str]:
+    def _get_or_create_flaresolverr_session(self) -> Optional[str]:
+        """Get existing FlareSolverr session or create a new one.
+        
+        Sessions allow faster subsequent requests by reusing browser context.
+        """
+        if not self.flaresolverr_enabled:
+            return None
+        
+        # Check if existing session is still valid
+        if self.flaresolverr_session_id:
+            session_age = time.time() - self.flaresolverr_session_created
+            if session_age < self.flaresolverr_session_ttl:
+                logger.debug(f"[FlareSolverr] Reusing session {self.flaresolverr_session_id} (age: {int(session_age)}s)")
+                return self.flaresolverr_session_id
+            else:
+                # Session expired, destroy it
+                logger.info(f"[FlareSolverr] Session expired, destroying...")
+                self._destroy_flaresolverr_session()
+        
+        # Create new session
+        try:
+            import uuid
+            session_id = f"groogybot_{uuid.uuid4().hex[:8]}"
+            
+            payload = {
+                "cmd": "sessions.create",
+                "session": session_id
+            }
+            
+            logger.info(f"[FlareSolverr] Creating session {session_id}...")
+            resp = requests.post(
+                self.flaresolverr_url,
+                json=payload,
+                timeout=30
+            )
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "ok":
+                    self.flaresolverr_session_id = session_id
+                    self.flaresolverr_session_created = time.time()
+                    logger.info(f"[FlareSolverr] Session created: {session_id}")
+                    return session_id
+            
+            logger.warning(f"[FlareSolverr] Failed to create session: {resp.text[:200]}")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"[FlareSolverr] Session creation error: {e}")
+            return None
+    
+    def _destroy_flaresolverr_session(self):
+        """Destroy the current FlareSolverr session."""
+        if not self.flaresolverr_session_id:
+            return
+        
+        try:
+            payload = {
+                "cmd": "sessions.destroy",
+                "session": self.flaresolverr_session_id
+            }
+            
+            requests.post(self.flaresolverr_url, json=payload, timeout=10)
+            logger.debug(f"[FlareSolverr] Session {self.flaresolverr_session_id} destroyed")
+        except Exception as e:
+            logger.debug(f"[FlareSolverr] Session destroy error: {e}")
+        finally:
+            self.flaresolverr_session_id = None
+            self.flaresolverr_session_created = 0
+
+    def _fetch_with_flaresolverr(self, url: str, max_timeout: int = 60000, use_session: bool = True) -> Optional[str]:
         """Fetch URL using FlareSolverr to bypass Cloudflare protection.
+        
+        Args:
+            url: URL to fetch
+            max_timeout: Maximum wait time in milliseconds
+            use_session: If True, use/create persistent session for faster requests
         
         Returns the HTML content as a string, or None if failed.
         """
@@ -3170,7 +3253,13 @@ class Scraper:
                 "maxTimeout": max_timeout
             }
             
-            logger.info(f"[FlareSolverr] Requesting: {url}")
+            # Add session for faster subsequent requests
+            if use_session:
+                session_id = self._get_or_create_flaresolverr_session()
+                if session_id:
+                    payload["session"] = session_id
+            
+            logger.info(f"[FlareSolverr] Requesting: {url}" + (f" (session: {payload.get('session', 'none')})" if use_session else ""))
             resp = requests.post(
                 self.flaresolverr_url,
                 json=payload,
@@ -3179,12 +3268,22 @@ class Scraper:
             
             if resp.status_code != 200:
                 logger.warning(f"[FlareSolverr] HTTP error: {resp.status_code}")
+                # Session might be invalid, clear it
+                if use_session and resp.status_code in [400, 500]:
+                    self.flaresolverr_session_id = None
                 return None
             
             data = resp.json()
             
             if data.get("status") != "ok":
-                logger.warning(f"[FlareSolverr] Request failed: {data.get('message', 'Unknown error')}")
+                error_msg = data.get('message', 'Unknown error')
+                logger.warning(f"[FlareSolverr] Request failed: {error_msg}")
+                # Session expired or invalid
+                if 'session' in error_msg.lower() and use_session:
+                    logger.info("[FlareSolverr] Session invalid, clearing...")
+                    self.flaresolverr_session_id = None
+                    # Retry without session
+                    return self._fetch_with_flaresolverr(url, max_timeout, use_session=False)
                 return None
             
             solution = data.get("solution", {})
@@ -3239,6 +3338,22 @@ class Scraper:
         base_session = self._get_fresh_session(rotate_ip=True) if heavy_security else self.session
         if heavy_security:
             logger.debug(f"[FETCH] Using fresh session + IP rotation for {domain}")
+        
+        # For known Cloudflare-protected sites, try FlareSolverr first
+        is_flaresolverr_primary = any(site in domain for site in self.flaresolverr_primary_sites) if hasattr(self, 'flaresolverr_primary_sites') else False
+        if is_flaresolverr_primary and self.flaresolverr_enabled:
+            logger.info(f"[FETCH] Using FlareSolverr as primary for {domain}")
+            html = self._fetch_with_flaresolverr(url)
+            if html:
+                # Create a fake response object with the HTML
+                fake_resp = requests.models.Response()
+                fake_resp.status_code = 200
+                fake_resp._content = html.encode('utf-8')
+                fake_resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+                fake_resp.url = url
+                return fake_resp
+            else:
+                logger.warning(f"[FETCH] FlareSolverr primary failed for {domain}, falling back to regular requests")
         
         # Identify which site we're hitting
         site_key = None
@@ -3353,6 +3468,20 @@ class Scraper:
                     logger.debug(f"[FETCH] Mirror {mirror_domain} failed: {e}")
                 
                 time.sleep(0.5)
+        
+        # FlareSolverr fallback for blocked requests
+        if self.flaresolverr_enabled:
+            logger.info(f"[FETCH] Trying FlareSolverr fallback for {url}")
+            html = self._fetch_with_flaresolverr(url)
+            if html:
+                # Create a fake response object with the HTML
+                fake_resp = requests.models.Response()
+                fake_resp.status_code = 200
+                fake_resp._content = html.encode('utf-8')
+                fake_resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+                fake_resp.url = url
+                logger.info(f"[FETCH] ✓ FlareSolverr fallback success for {url}")
+                return fake_resp
         
         logger.error(f"[FETCH] ✗ All attempts failed for {url}")
         return None
