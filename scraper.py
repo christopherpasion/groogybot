@@ -1183,7 +1183,8 @@ class Scraper:
         self.flaresolverr_session_ttl = 900  # 15 minutes session TTL
         
         # Sites that should use FlareSolverr as primary method (known Cloudflare protected)
-        self.flaresolverr_primary_sites = ['ranobes', 'novelbin', 'lightnovelworld']
+        # Note: Ranobes removed - chapter content works with regular requests, only list pages need FlareSolverr
+        self.flaresolverr_primary_sites = ['novelbin', 'lightnovelworld']
         
         if self.flaresolverr_enabled:
             logger.info(f"[SCRAPER] FlareSolverr enabled at {self.flaresolverr_url}")
@@ -2167,11 +2168,11 @@ class Scraper:
                     'status': 'in_progress'
                 })
             
-            # Reduce parallelism for Ranobes to avoid Cloudflare rate limits
+            # Ranobes chapter content works with regular requests (only list pages need FlareSolverr)
             chapter_workers = self.parallel_workers
             if 'ranobes' in url:
-                chapter_workers = 1  # Sequential for Ranobes
-                logger.info(f"[Ranobes] Using sequential chapter downloads to avoid rate limits")
+                chapter_workers = min(10, self.parallel_workers)  # 10 parallel workers for Ranobes
+                logger.info(f"[Ranobes] Using {chapter_workers} parallel workers for chapter downloads")
             
             with ThreadPoolExecutor(
                     max_workers=chapter_workers) as executor:
