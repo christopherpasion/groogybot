@@ -2102,13 +2102,15 @@ class Scraper:
                 }
 
             # 3. Filter chapters by range
-            # Sort by chapter number if possible
-            try:
-                chapter_links = sorted(
-                    chapter_links,
-                    key=lambda x: self._extract_chapter_number(x) or 0)
-            except Exception as e:
-                logger.warning(f"Sorting chapter links failed: {e}")
+            # Sort by chapter number if possible (but skip for Ranobes - they use internal IDs, not chapter numbers)
+            # Ranobes returns chapters in correct order from JSON already
+            if 'ranobes' not in url:
+                try:
+                    chapter_links = sorted(
+                        chapter_links,
+                        key=lambda x: self._extract_chapter_number(x) or 0)
+                except Exception as e:
+                    logger.warning(f"Sorting chapter links failed: {e}")
 
             include_prologue = 'ranobes' in url and chapter_start == 1
 
@@ -2910,12 +2912,25 @@ class Scraper:
 
             # --- Ranobes Specific Cleaning ---
             if 'ranobes' in url:
-                # Remove unwanted UI elements
-                for junk in soup.select(
-                    "script, style, .ads, .social-buttons, .navigation, .btn-group, .mechanic-buttons, "
-                    "#u_o, #u_b, #click_y, #bookmark, .bookmark, .footer, .bottom-menu, .stats, .report, "
-                    "a[href*='chapter-list'], a[href*='next-chapter'], .nav-buttons, .prev-next, .next-chapter, .prev-chapter, img"
-                ):
+                # Remove ALL ad-related elements aggressively
+                ad_selectors = [
+                    # Scripts and styles
+                    "script", "style", "noscript",
+                    # Ad containers (specific IDs and classes from Ranobes)
+                    ".free-support-top", ".free-support-bottom",
+                    "[id^='bg-ssp-']", "[id^='pf-']", "[id^='yandex_rtb']",
+                    # Ad networks
+                    "[data-format='display']", ".adsbygoogle",
+                    # UI elements
+                    ".ads", ".social-buttons", ".navigation", ".btn-group", ".mechanic-buttons",
+                    "#u_o", "#u_b", "#click_y", "#bookmark", ".bookmark", 
+                    ".footer", ".bottom-menu", ".stats", ".report",
+                    "a[href*='chapter-list']", "a[href*='next-chapter']", 
+                    ".nav-buttons", ".prev-next", ".next-chapter", ".prev-chapter",
+                    "img", ".language", ".read-topbar", ".addlist",
+                    ".story_tools", ".meta", ".category"
+                ]
+                for junk in soup.select(", ".join(ad_selectors)):
                     junk.decompose()
 
                 # Try all possible containers for chapter text
@@ -2929,19 +2944,70 @@ class Scraper:
                 )
 
                 if content_div:
-                    for tag in content_div.select('.ads, .nav-buttons, .bookmark, .report, div[align="center"]'):
+                    # Remove any remaining ad/junk elements inside content
+                    for tag in content_div.select('.ads, .nav-buttons, .bookmark, .report, div[align="center"], [id^="bg-ssp-"], [id^="pf-"], .free-support-top, .free-support-bottom'):
                         tag.decompose()
                     
-                    # Extract content preserving italics/emphasis
-                    # Convert <em>, <i> to markdown-style *text* for EPUB
-                    for em_tag in content_div.find_all(['em', 'i']):
-                        em_text = em_tag.get_text()
-                        em_tag.replace_with(f'*{em_text}*')
+                    # Extract content paragraph by paragraph to preserve inline formatting
+                    # This prevents <i>text</i> from breaking onto separate lines
+                    paragraphs = content_div.find_all('p')
+                    cleaned_paragraphs = []
                     
-                    raw_content = content_div.get_text(separator='\n\n', strip=True)
+                    # Ad/spam patterns to skip
+                    ad_patterns = [
+                        r'ADVERTISEMENT',
+                        r'You\'ll never believe',
+                        r'My life in emojis',
+                        r'MeetSingles',
+                        r'pubadxtag',
+                        r'pubfuturetag',
+                        r'window\.',
+                        r'adx_id_',
+                        r'zoneid:',
+                    ]
+                    ad_regex = re.compile('|'.join(ad_patterns), re.IGNORECASE)
+                    
+                    for p in paragraphs:
+                        # Get text with spaces (preserves inline elements like <i>)
+                        para_text = p.get_text(separator=' ', strip=True)
+                        
+                        # Skip empty paragraphs
+                        if not para_text:
+                            continue
+                        
+                        # Skip ad content
+                        if ad_regex.search(para_text):
+                            continue
+                        
+                        # Skip UI elements
+                        if para_text.upper() in [
+                            'OPTIONS', 'BOOKMARK', 'CHAPTERS LIST', 'NEXT >>', 'PREVIOUS',
+                            'REPORT', 'BACK', '<< BACK', 'NEXT', 'NEXT >>'
+                        ]:
+                            continue
+                        
+                        if re.match(r'^\d+\s*Report$', para_text, re.I):
+                            continue
+                        
+                        # Preserve italics/emphasis as markdown-style *text*
+                        for em_tag in p.find_all(['em', 'i']):
+                            em_text = em_tag.get_text()
+                            # Only wrap if not already wrapped
+                            if em_text and not em_text.startswith('*'):
+                                em_tag.string = f'*{em_text}*'
+                        
+                        # Re-extract after italic processing
+                        para_text = p.get_text(separator=' ', strip=True)
+                        
+                        # Clean up extra spaces
+                        para_text = re.sub(r'\s+', ' ', para_text).strip()
+                        
+                        if para_text:
+                            cleaned_paragraphs.append(para_text)
+                    
+                    raw_content = '\n\n'.join(cleaned_paragraphs)
                     
                     # Remove Ranobes watermarks (various Unicode obfuscated versions)
-                    # Pattern matches: ŖᴀNÕḂĒŚ, RANOBES, ᖇᗩᑎOᗷᗴᔕ, etc.
                     watermark_patterns = [
                         r'ŖᴀNÕḂĒŚ',
                         r'RANOBES',
@@ -2954,20 +3020,7 @@ class Scraper:
                     for pattern in watermark_patterns:
                         raw_content = re.sub(pattern, '', raw_content, flags=re.IGNORECASE)
                     
-                    lines = raw_content.split('\n')
-                    cleaned_lines = []
-                    for line in lines:
-                        l = line.strip()
-                        if l.upper() in [
-                            'OPTIONS', 'BOOKMARK', 'CHAPTERS LIST', 'NEXT >>', 'PREVIOUS',
-                            'REPORT', 'BACK', '<< BACK', 'NEXT', 'NEXT >>'
-                        ]:
-                            continue
-                        if re.match(r'^\d+\s*Report$', l, re.I):
-                            continue
-                        if l:
-                            cleaned_lines.append(l)
-                    content = '\n\n'.join(cleaned_lines)
+                    content = raw_content
                 else:
                     # Fallback: extract all visible <p> tags from the main content area (include all non-empty lines)
                     paragraphs = soup.find_all('p')
