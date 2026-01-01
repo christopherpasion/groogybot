@@ -3169,9 +3169,15 @@ class Scraper:
                 content = re.sub(r'\n{3,}', '\n\n', content)
 
             # If the numbers or slug path don't match, treat as suspect and do not cache (slugged sites)
-            if (number_mismatch or slug_path_mismatch) and 'novelbuddy' in url:
+            # For NovelBuddy, if title_num is 999999 (not found), use url_num as fallback
+            if 'novelbuddy' in url and title_num == 999999 and url_num:
+                title_num = url_num
+                chapter_num = url_num
+                number_mismatch = False
+            # Remove strict mismatch check: always allow caching unless slug_path_mismatch is True
+            if slug_path_mismatch and 'novelbuddy' in url:
                 logger.warning(
-                    f"[Chapter] NovelBuddy mismatch: expected={expected_num}, title_num={title_num}, url_num={url_num}, slug_path_mismatch={slug_path_mismatch}; skipping cache and marking as failed"
+                    f"[Chapter] NovelBuddy slug path mismatch: expected={expected_num}, title_num={title_num}, url_num={url_num}, slug_path_mismatch={slug_path_mismatch}; skipping cache and marking as failed"
                 )
                 return None
 
