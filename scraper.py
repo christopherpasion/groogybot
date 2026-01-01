@@ -104,6 +104,37 @@ SITE_MIRRORS = {
     ],
 }
 
+# Site health status cache (avoid repeated checks)
+_site_health_cache = {}
+_site_health_cache_ttl = 300  # 5 minutes
+
+
+def check_site_health(site_url: str, timeout: int = 5) -> bool:
+    """Check if a site is accessible. Returns True if healthy, False if dead/blocked.
+    
+    Results are cached for 5 minutes to avoid repeated checks.
+    """
+    import time as time_module
+    
+    # Check cache first
+    cache_key = site_url.split('/')[2] if '://' in site_url else site_url
+    if cache_key in _site_health_cache:
+        cached_time, cached_result = _site_health_cache[cache_key]
+        if time_module.time() - cached_time < _site_health_cache_ttl:
+            return cached_result
+    
+    try:
+        resp = requests.head(site_url, timeout=timeout, allow_redirects=True,
+                            headers={'User-Agent': random.choice(USER_AGENTS)})
+        is_healthy = resp.status_code < 400
+        _site_health_cache[cache_key] = (time_module.time(), is_healthy)
+        logger.debug(f"[Health] {cache_key}: {'OK' if is_healthy else 'DEAD'} (HTTP {resp.status_code})")
+        return is_healthy
+    except Exception as e:
+        _site_health_cache[cache_key] = (time_module.time(), False)
+        logger.debug(f"[Health] {cache_key}: DEAD ({e})")
+        return False
+
 
 class Scraper:
     def search_all_sites_with_choices(self, query: str, use_cache: bool = True) -> List[Dict[str, str]]:
@@ -128,10 +159,26 @@ class Scraper:
                 logger.info(f"[Search] Using cached results for '{query}' ({len(cached_results)} results)")
                 return cached_results
 
+        # Site health URLs for pre-checking
+        site_health_urls = {
+            'NovelBin': 'https://novelbin.me/',
+            'RoyalRoad': 'https://www.royalroad.com/',
+            'Ranobes': 'https://ranobes.net/',
+            'NovelFire': 'https://novelfire.net/',
+            'FreeWebNovel': 'https://freewebnovel.com/',
+            'CreativeNovels': 'https://creativenovels.com/',
+            'LightNovelWorld': 'https://lightnovelworld.com/',
+            'LNMTL': 'https://lnmtl.com/',
+            'ReaderNovel': 'https://readernovel.com/',
+            'NovelBuddy': 'https://novelbuddy.com/',
+            'LibRead': 'https://libread.com/',
+            'YongLibrary': 'https://yonglibrary.com/',
+        }
+        
         # Only include working sites (tested Dec 2025)
         # Dead/blocked sites removed: BoxNovel, LightNovelCave, EmpireNovel, WTR-Lab, 
         # FullNovels, NiceNovel, BedNovel, AllNovelBook, EnglishNovelsFree, ReadNovelFull
-        site_funcs = [
+        all_site_funcs = [
             ('NovelBin', lambda: self.search_novelbin_multiple(query)),
             ('RoyalRoad', lambda: self.search_royalroad_multiple(query)),
             ('Ranobes', lambda: self._search_ranobes(query)),
@@ -146,8 +193,22 @@ class Scraper:
             ('YongLibrary', lambda: self._search_yonglibrary(query)),
             ('DuckDuckGo', lambda: self._search_duckduckgo_novels(query)),
         ]
+        
+        # Quick health check - skip sites that are down (with 2s timeout for speed)
+        dead_sites = []
+        for site_name, health_url in site_health_urls.items():
+            if not check_site_health(health_url, timeout=2):
+                dead_sites.append(site_name)
+                logger.info(f"[Search] Skipping {site_name} - site appears down")
+        
+        # Filter out dead sites
+        site_funcs = [(name, func) for name, func in all_site_funcs if name not in dead_sites]
+        
+        if dead_sites:
+            logger.info(f"[Search] Skipped {len(dead_sites)} dead sites: {', '.join(dead_sites)}")
 
         results = []
+        site_errors = []  # Track which sites failed
         with ThreadPoolExecutor(max_workers=8) as executor:
             future_to_site = {executor.submit(func): name for name, func in site_funcs}
             for future in as_completed(future_to_site):
@@ -158,6 +219,7 @@ class Scraper:
                         results.extend(site_results)
                     logger.info(f"[Search] {site_name} search complete, found {len(site_results) if site_results else 0} results.")
                 except Exception as e:
+                    site_errors.append(f"{site_name}: {str(e)[:50]}")
                     logger.error(f"{site_name} search error: {e}")
 
         # Deduplicate by URL
@@ -172,6 +234,10 @@ class Scraper:
         if use_cache and CACHE_AVAILABLE and unique_results:
             cache = get_cache()
             cache.set_search_results(query, unique_results)
+
+        # Log site errors summary
+        if site_errors:
+            logger.warning(f"[Search] {len(site_errors)} sites had errors: {'; '.join(site_errors)}")
 
         logger.info(f"[Search] All site searches complete. Returning {len(unique_results)} unique results.")
         return unique_results
@@ -1503,11 +1569,25 @@ class Scraper:
     def scrape(self,
                url: str,
                chapter_start: int = 1,
-               chapter_end: Optional[int] = None) -> Dict:
+               chapter_end: Optional[int] = None,
+               user_id: str = None) -> Dict:
         """
         Main entry point for scraping - coordinates metadata fetching and chapter downloading.
+        
+        Supports resume: if user_id is provided and a previous download was interrupted,
+        only downloads missing chapters.
         """
         try:
+            # Check for resumable progress
+            resume_info = None
+            if user_id and CACHE_AVAILABLE:
+                cache = get_cache()
+                resume_info = cache.get_download_progress(user_id, url)
+                if resume_info and resume_info.get('status') in ['in_progress', 'failed', 'partial']:
+                    completed_chapters = resume_info.get('completed_chapters', [])
+                    if completed_chapters:
+                        logger.info(f"[Resume] Found {len(completed_chapters)} previously downloaded chapters for user {user_id}")
+            
             # 1. Fetch metadata first to get title and confirm site support
             metadata_result = self.get_novel_metadata(url)
             if 'error' in metadata_result and not metadata_result.get('title'):
@@ -1581,45 +1661,130 @@ class Scraper:
             if self.progress_callback:
                 self.progress_callback(0, total_to_download)
 
-            # 4. Download chapters in parallel
+            # 4. Download chapters in parallel (with resume support)
             chapters = []
+            failed_urls = []
+            completed_urls = []
+            
+            # If resuming, get already-cached chapters first
+            if resume_info and CACHE_AVAILABLE:
+                cache = get_cache()
+                for i, link_url in enumerate(target_links):
+                    cached = cache.get_chapter(link_url, url)
+                    if cached:
+                        chapters.append(cached)
+                        completed_urls.append(link_url)
+                if completed_urls:
+                    logger.info(f"[Resume] Loaded {len(completed_urls)} chapters from cache")
+                    # Remove already-cached from target_links
+                    target_links = [u for u in target_links if u not in completed_urls]
+                    total_to_download = len(target_links) + len(completed_urls)
+            
+            # Save initial progress
+            if user_id and CACHE_AVAILABLE:
+                cache = get_cache()
+                cache.save_download_progress(user_id, url, {
+                    'title': title,
+                    'chapter_start': chapter_start,
+                    'chapter_end': chapter_end or len(chapter_links),
+                    'completed_chapters': completed_urls,
+                    'failed_chapters': [],
+                    'status': 'in_progress'
+                })
+            
             with ThreadPoolExecutor(
                     max_workers=self.parallel_workers) as executor:
                 future_to_url = {
-                    executor.submit(self._download_chapter, link_url, i + chapter_start, url):
+                    executor.submit(self._download_chapter, link_url, i + chapter_start + len(completed_urls), url):
                     link_url
                     for i, link_url in enumerate(target_links)
                 }
 
-                completed = 0
+                completed = len(completed_urls)
                 for future in as_completed(future_to_url):
                     if self.cancel_check and self.cancel_check():
                         executor.shutdown(wait=False, cancel_futures=True)
+                        # Save partial progress for resume
+                        if user_id and CACHE_AVAILABLE:
+                            cache.save_download_progress(user_id, url, {
+                                'title': title,
+                                'chapter_start': chapter_start,
+                                'chapter_end': chapter_end or len(chapter_links),
+                                'completed_chapters': completed_urls,
+                                'failed_chapters': failed_urls,
+                                'status': 'partial'
+                            })
                         break
 
+                    chapter_url = future_to_url[future]
                     try:
                         chapter = future.result()
                         if chapter:
                             chapters.append(chapter)
+                            completed_urls.append(chapter_url)
+                        else:
+                            failed_urls.append(chapter_url)
                     except Exception as e:
                         logger.error(f"Chapter download failed: {e}")
+                        failed_urls.append(chapter_url)
 
                     completed += 1
                     if self.progress_callback:
                         self.progress_callback(completed, total_to_download)
+                    
+                    # Periodically save progress (every 10 chapters)
+                    if user_id and CACHE_AVAILABLE and completed % 10 == 0:
+                        cache.save_download_progress(user_id, url, {
+                            'title': title,
+                            'chapter_start': chapter_start,
+                            'chapter_end': chapter_end or len(chapter_links),
+                            'completed_chapters': completed_urls,
+                            'failed_chapters': failed_urls,
+                            'status': 'in_progress'
+                        })
 
             # Sort final chapters by number
             chapters.sort(key=lambda x: x.get('chapter_num', 0))
+            
+            # Clear progress on success (or mark as complete with failures)
+            if user_id and CACHE_AVAILABLE:
+                if failed_urls:
+                    cache.save_download_progress(user_id, url, {
+                        'title': title,
+                        'chapter_start': chapter_start,
+                        'chapter_end': chapter_end or len(chapter_links),
+                        'completed_chapters': completed_urls,
+                        'failed_chapters': failed_urls,
+                        'status': 'partial'
+                    })
+                else:
+                    cache.clear_download_progress(user_id, url)
 
             return {
                 'title': title,
                 'metadata': metadata,
                 'chapters': chapters,
                 'novel_url': url,
-                'total_available': total_available
+                'total_available': total_available,
+                'failed_chapters': len(failed_urls) if failed_urls else 0
             }
         except Exception as e:
             logger.error(f"Scrape error: {e}", exc_info=True)
+            # Save error progress
+            if user_id and CACHE_AVAILABLE:
+                try:
+                    cache = get_cache()
+                    cache.save_download_progress(user_id, url, {
+                        'title': title if 'title' in dir() else 'Unknown',
+                        'chapter_start': chapter_start,
+                        'chapter_end': chapter_end,
+                        'completed_chapters': completed_urls if 'completed_urls' in dir() else [],
+                        'failed_chapters': [],
+                        'status': 'failed',
+                        'error': str(e)
+                    })
+                except:
+                    pass
             return {'title': 'Unknown', 'chapters': [], 'error': str(e)}
 
     def _get_ranobes_chapter_links(self, url: str) -> List[str]:
@@ -1760,6 +1925,9 @@ class Scraper:
         Uses cache to avoid re-downloading chapters that haven't changed.
         """
         try:
+            # Add random delay between chapter downloads to avoid rate limiting
+            self._random_delay(0.3, 1.0)
+            
             # Check cache first - chapter content doesn't change
             if CACHE_AVAILABLE:
                 cache = get_cache()

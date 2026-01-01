@@ -234,6 +234,91 @@ class NovelCache:
             'total_size_mb': round(total_size / (1024 * 1024), 2),
             'cache_dir': str(self.cache_dir)
         }
+    
+    # === Download Progress (Resume Support) ===
+    
+    def save_download_progress(self, user_id: str, novel_url: str, progress: Dict):
+        """Save download progress for resume capability.
+        
+        Args:
+            user_id: Discord user ID
+            novel_url: URL of the novel being downloaded
+            progress: Dict with keys: title, chapter_start, chapter_end, 
+                     completed_chapters (list), failed_chapters (list), status
+        """
+        progress_dir = self.cache_dir / "progress"
+        progress_dir.mkdir(exist_ok=True)
+        
+        key = f"{user_id}_{self._url_hash(novel_url)}"
+        cache_file = progress_dir / f"{key}.json"
+        
+        try:
+            progress['_updated_at'] = time.time()
+            progress['_user_id'] = user_id
+            progress['_novel_url'] = novel_url
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(progress, f, ensure_ascii=False, indent=2)
+            logger.debug(f"[Cache] Saved progress for user {user_id}: {len(progress.get('completed_chapters', []))} chapters")
+        except Exception as e:
+            logger.warning(f"[Cache] Failed to save progress: {e}")
+    
+    def get_download_progress(self, user_id: str, novel_url: str = None) -> Optional[Dict]:
+        """Get download progress for a user.
+        
+        If novel_url is provided, returns progress for that specific novel.
+        Otherwise, returns the most recent incomplete download.
+        """
+        progress_dir = self.cache_dir / "progress"
+        if not progress_dir.exists():
+            return None
+        
+        if novel_url:
+            key = f"{user_id}_{self._url_hash(novel_url)}"
+            cache_file = progress_dir / f"{key}.json"
+            
+            if cache_file.exists():
+                try:
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        return json.load(f)
+                except Exception:
+                    return None
+        else:
+            # Find most recent incomplete download for this user
+            user_files = list(progress_dir.glob(f"{user_id}_*.json"))
+            if not user_files:
+                return None
+            
+            # Sort by modification time, newest first
+            user_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            
+            for f in user_files:
+                try:
+                    with open(f, 'r', encoding='utf-8') as file:
+                        data = json.load(file)
+                        if data.get('status') in ['in_progress', 'failed', 'partial']:
+                            return data
+                except Exception:
+                    continue
+        
+        return None
+    
+    def clear_download_progress(self, user_id: str, novel_url: str = None):
+        """Clear download progress (after successful completion or manual cancel)."""
+        progress_dir = self.cache_dir / "progress"
+        if not progress_dir.exists():
+            return
+        
+        if novel_url:
+            key = f"{user_id}_{self._url_hash(novel_url)}"
+            cache_file = progress_dir / f"{key}.json"
+            if cache_file.exists():
+                cache_file.unlink()
+                logger.debug(f"[Cache] Cleared progress for user {user_id}")
+        else:
+            # Clear all progress for user
+            for f in progress_dir.glob(f"{user_id}_*.json"):
+                f.unlink()
+            logger.debug(f"[Cache] Cleared all progress for user {user_id}")
 
 
 # Global cache instance

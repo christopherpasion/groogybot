@@ -32,6 +32,59 @@ HEADERS = {
 }
 
 
+def compress_image(image_data: bytes, max_size: tuple = (800, 1200), quality: int = 75) -> Tuple[bytes, str]:
+    """Compress and optimize an image for EPUB/PDF.
+    
+    Converts to JPEG for smaller file size, resizes if too large.
+    
+    Args:
+        image_data: Raw image bytes
+        max_size: Maximum (width, height) - will resize proportionally
+        quality: JPEG quality (1-100, lower = smaller file)
+    
+    Returns:
+        (compressed_bytes, media_type)
+    """
+    try:
+        from PIL import Image
+        from io import BytesIO
+        
+        # Load image
+        img = Image.open(BytesIO(image_data))
+        
+        # Convert to RGB if necessary (for JPEG)
+        if img.mode in ('RGBA', 'P', 'LA'):
+            # Create white background for transparent images
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            if 'A' in img.mode:
+                background.paste(img, mask=img.split()[-1])
+            else:
+                background.paste(img)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Resize if too large
+        if img.width > max_size[0] or img.height > max_size[1]:
+            img.thumbnail(max_size, Image.Resampling.LANCZOS)
+            logger.debug(f"Resized image to {img.size}")
+        
+        # Compress to JPEG
+        output = BytesIO()
+        img.save(output, format='JPEG', quality=quality, optimize=True)
+        compressed = output.getvalue()
+        
+        logger.debug(f"Compressed image: {len(image_data)} -> {len(compressed)} bytes ({100*len(compressed)//len(image_data)}%)")
+        
+        return compressed, 'image/jpeg'
+        
+    except Exception as e:
+        logger.warning(f"Image compression failed: {e}, using original")
+        return image_data, 'image/jpeg'
+
+
 def fetch_cover_image(title: str, source_url: str = None, metadata: dict = None) -> Tuple[Optional[bytes], str]:
     """
     Fetch cover image with fallback chain:
@@ -620,19 +673,10 @@ def create_epub(novel_data, user_id: str = None, user_tier: str = 'verified',
     has_cover = False
     
     if cover_data:
-        # Determine image extension
-        if 'png' in content_type:
-            img_ext = 'png'
-            media_type = 'image/png'
-        elif 'gif' in content_type:
-            img_ext = 'gif'
-            media_type = 'image/gif'
-        elif 'webp' in content_type:
-            img_ext = 'webp'
-            media_type = 'image/webp'
-        else:
-            img_ext = 'jpg'
-            media_type = 'image/jpeg'
+        # Compress cover image for smaller file size
+        cover_data, content_type = compress_image(cover_data, max_size=(800, 1200), quality=75)
+        img_ext = 'jpg'
+        media_type = 'image/jpeg'
 
         cover_image_obj = epub.EpubImage()
         cover_image_obj.file_name = f'images/cover.{img_ext}'
@@ -1033,6 +1077,9 @@ def create_pdf(novel_data, user_id: str = None, user_tier: str = 'verified'):
     
     if cover_data:
         try:
+            # Compress cover image for smaller PDF file size
+            cover_data, _ = compress_image(cover_data, max_size=(600, 900), quality=70)
+            
             # Save cover to temp file and add to PDF
             img_buffer = BytesIO(cover_data)
             cover_img = RLImage(img_buffer)
