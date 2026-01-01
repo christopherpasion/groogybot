@@ -101,6 +101,8 @@ async def log_to_sheets(data: dict, loop=None):
 # Helper to get token securely
 TOKEN = os.getenv('DISCORD_TOKEN')
 SERVER_ID = int(os.getenv('DISCORD_SERVER_ID', '0'))
+SHRINKME_API_KEY = os.getenv('SHRINKME_API_KEY', '')
+SHRINKEARN_API_KEY = os.getenv('SHRINKEARN_API_KEY', '')
 
 # Ad-free upgrade message for free users
 AD_FREE_MESSAGE = (
@@ -109,8 +111,68 @@ AD_FREE_MESSAGE = (
     "https://www.patreon.com/c/meowisteaandcoffee/membership")
 
 
+def _try_shrinkme(long_url: str) -> str:
+    """Try ShrinkMe API. Returns shortened URL or None on failure."""
+    if not SHRINKME_API_KEY:
+        return None
+    try:
+        endpoint = "https://shrinkme.io/api"
+        params = {"api": SHRINKME_API_KEY, "url": long_url}
+        response = requests.get(endpoint, params=params, timeout=10)
+        data = response.json()
+        if "shortenedUrl" in data and data["shortenedUrl"]:
+            logger.info(
+                f"ShrinkMe shortened: {long_url[:50]}... -> {data['shortenedUrl']}"
+            )
+            return data["shortenedUrl"]
+    except Exception as e:
+        logger.error(f"ShrinkMe API failed: {e}")
+    return None
+
+
+def _try_shrinkearn(long_url: str) -> str:
+    """Try ShrinkEarn API as fallback. Returns shortened URL or None on failure."""
+    if not SHRINKEARN_API_KEY:
+        return None
+    try:
+        endpoint = "https://shrinkearn.com/api"
+        params = {"api": SHRINKEARN_API_KEY, "url": long_url}
+        response = requests.get(endpoint, params=params, timeout=10)
+        data = response.json()
+        if "shortenedUrl" in data and data["shortenedUrl"]:
+            logger.info(
+                f"ShrinkEarn shortened: {long_url[:50]}... -> {data['shortenedUrl']}"
+            )
+            return data["shortenedUrl"]
+    except Exception as e:
+        logger.error(f"ShrinkEarn API failed: {e}")
+    return None
+
+
 def shorten_with_shrinkme(long_url: str, service: str = "") -> str:
-    """URL shortening disabled - returns direct URL."""
+    """Shorten a URL using ad monetization APIs (ShrinkMe primary, ShrinkEarn fallback).
+    Returns shortened URL on success, original URL if both fail.
+    Skips hosts that already have their own redirect/UI to avoid multiple redirects."""
+
+    # Skip for hosts that already have their own page/redirect
+    skip_hosts = ['gofile', 'file.io', 'fileio']
+    if service and any(host in service.lower() for host in skip_hosts):
+        logger.info(f"Skipping ad link for {service} (already has redirect)")
+        return long_url
+
+    # Try ShrinkMe first
+    result = _try_shrinkme(long_url)
+    if result:
+        return result
+
+    # Fallback to ShrinkEarn
+    result = _try_shrinkearn(long_url)
+    if result:
+        return result
+
+    # Both failed, return original (no ads)
+    logger.warning(
+        "Both ShrinkMe and ShrinkEarn failed, returning direct link")
     return long_url
 
 # Role names (case-insensitive matching)

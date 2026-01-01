@@ -6,6 +6,8 @@ import time
 import logging
 import random
 
+import os
+
 import asyncio
 from typing import List, Optional, Dict, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -986,6 +988,15 @@ class Scraper:
         # instance so cookies and identity are reused across requests.
         self.headers = {'User-Agent': random.choice(USER_AGENTS)}
         self.session = requests.Session()
+        
+        # Configure proxy from environment variable (format: http://user:pass@host:port)
+        self.proxy_url = os.getenv('PROXY_URL', '')
+        if self.proxy_url:
+            self.session.proxies = {
+                'http': self.proxy_url,
+                'https': self.proxy_url
+            }
+            logger.info(f"Scraper using proxy: {self.proxy_url.split('@')[-1] if '@' in self.proxy_url else self.proxy_url}")
         
         # Configure session for better anti-detection
         self.session.headers.update(self._get_random_headers())

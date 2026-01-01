@@ -783,7 +783,10 @@ def create_epub(novel_data, user_id: str = None, user_tier: str = 'verified',
         # Smart paragraph processing with styling
         paragraphs = content.split('\n')
         for para in paragraphs:
+            # Strip all whitespace including non-breaking spaces
             para = para.strip()
+            para = para.replace('\xa0', ' ').replace('\u00a0', ' ')  # Replace non-breaking spaces
+            para = ' '.join(para.split())  # Normalize all whitespace to single spaces
             if not para:
                 continue
             
