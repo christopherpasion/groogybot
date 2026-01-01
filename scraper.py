@@ -1104,10 +1104,11 @@ class Scraper:
     PAID_SITES = ['webnovel', 'qidian', 'wuxiaworld']
 
     def __init__(self,
-                 parallel_workers: int = 10,
+                 parallel_workers: int = 3,
                  use_playwright: bool = True):
         # Use a single persistent User-Agent and HTTP session per Scraper
         # instance so cookies and identity are reused across requests.
+        # NOTE: Keep parallel_workers low (3-5) to avoid anti-bot detection
         self.headers = {'User-Agent': random.choice(USER_AGENTS)}
         self.session = requests.Session()
         
@@ -1921,7 +1922,8 @@ class Scraper:
             logger.info(
                 f"Parallel fetching {len(page_urls)} additional pages...")
 
-            with ThreadPoolExecutor(max_workers=10) as executor:
+            # Use fewer workers for page fetching to avoid rate limits
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 future_to_url = {
                     executor.submit(self._fetch_ranobes_page_links, u): u
                     for u in page_urls
@@ -1982,7 +1984,11 @@ class Scraper:
         """
         try:
             # Add random delay between chapter downloads to avoid rate limiting
-            self._random_delay(0.3, 1.0)
+            # Use longer delay for ranobes which has aggressive rate limiting
+            if 'ranobes' in url:
+                self._random_delay(1.5, 3.0)  # Longer delay for ranobes
+            else:
+                self._random_delay(0.5, 1.5)  # Standard delay
             
             # Check cache first - chapter content doesn't change
             if CACHE_AVAILABLE:
@@ -2024,6 +2030,23 @@ class Scraper:
                     return None
             else:
                 soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # Check for anti-bot/rate limit page (common on ranobes)
+            page_text = soup.get_text()[:500].lower()
+            if 'abnormal activity' in page_text or 'detected abnormal' in page_text or 'dear visitor' in page_text:
+                logger.warning(f"[Chapter] Rate limited at chapter {chapter_num}, waiting 10s...")
+                time.sleep(10)  # Wait before retry
+                # Retry once with fresh session
+                resp = self._get_with_retry(url, referer=referer)
+                if resp:
+                    soup = BeautifulSoup(resp.content, 'html.parser')
+                    page_text = soup.get_text()[:500].lower()
+                    if 'abnormal activity' in page_text or 'dear visitor' in page_text:
+                        logger.error(f"[Chapter] Still rate limited for chapter {chapter_num}")
+                        return {'title': f'Chapter {chapter_num}', 'content': '[Rate limited - please try again later]', 'chapter_num': chapter_num}
+                else:
+                    return {'title': f'Chapter {chapter_num}', 'content': '[Rate limited - please try again later]', 'chapter_num': chapter_num}
+            
             content = ""
 
             # --- Ranobes Specific Cleaning ---
