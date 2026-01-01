@@ -398,11 +398,30 @@ class PlaywrightScraper:
             wait_until = 'networkidle' if wait_for_js else 'domcontentloaded'
             await page.goto(url, wait_until=wait_until, timeout=timeout)
             
+            # Check for browser check page and wait/reload if needed
+            content = await page.content()
+            if 'browser_check' in content and len(content) < 5000:
+                logger.info("[Playwright] Detected browser check page, waiting for redirect...")
+                await asyncio.sleep(3)  # Wait for JS to execute and set cookies
+                # Try reloading with the cookie set
+                await page.reload(wait_until='networkidle', timeout=timeout)
+                await asyncio.sleep(2)
+            
             if wait_selector:
                 try:
                     await page.wait_for_selector(wait_selector, timeout=10000)
                 except:
                     pass
+            
+            # For Ranobes, wait for actual content elements
+            if 'ranobes' in url.lower():
+                for selector in ['#dle-content', '.cat_block', '.chlist', '.r-fullstory-chapters-list', 'script:has-text("__DATA__")']:
+                    try:
+                        await page.wait_for_selector(selector, timeout=5000)
+                        logger.info(f"[Playwright] Found content selector: {selector}")
+                        break
+                    except:
+                        continue
             
             # Extra wait for JS-heavy pages
             if wait_for_js:
