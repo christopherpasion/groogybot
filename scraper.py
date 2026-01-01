@@ -1175,6 +1175,12 @@ class Scraper:
         self.use_playwright = use_playwright
         self._playwright_scraper = None
         
+        # FlareSolverr configuration for Cloudflare bypass
+        self.flaresolverr_url = os.getenv('FLARESOLVERR_URL', 'http://localhost:8191/v1')
+        self.flaresolverr_enabled = bool(os.getenv('FLARESOLVERR_URL', ''))
+        if self.flaresolverr_enabled:
+            logger.info(f"[SCRAPER] FlareSolverr enabled at {self.flaresolverr_url}")
+        
         logger.info(f"[SCRAPER] Initialized with {parallel_workers} workers, playwright={use_playwright}")
         if self.debug_mode:
             logger.info("[SCRAPER] Debug mode enabled (SCRAPER_DEBUG=1)")
@@ -1515,34 +1521,42 @@ class Scraper:
             slug_match = re.search(r'/novels/\d+-([^./]+)', url)
             slug = slug_match.group(1).lower() if slug_match else None
             base_chapters_url = f"https://ranobes.net/chapters/{novel_id}/"
-
-            resp = self._get_with_retry(base_chapters_url, rotate_on_block=True, rotate_per_attempt=True)
+            
             html_content = None
             
-            if not resp:
-                # Fallback to Playwright if regular requests fail
-                logger.info(f"[RANOBES] Regular fetch failed for chapter count, trying Playwright: {base_chapters_url}")
+            # Try FlareSolverr first (best for Cloudflare bypass)
+            if self.flaresolverr_enabled:
+                html_content = self._fetch_with_flaresolverr(base_chapters_url)
+                if html_content:
+                    logger.info(f"[RANOBES] FlareSolverr succeeded for chapter count")
+            
+            # Fallback to regular requests
+            if not html_content:
+                resp = self._get_with_retry(base_chapters_url, rotate_on_block=True, rotate_per_attempt=True)
+                if resp:
+                    html_content = resp.text
+            
+            # Fallback to Playwright
+            if not html_content:
+                logger.info(f"[RANOBES] Trying Playwright fallback for chapter count: {base_chapters_url}")
                 try:
                     from playwright_scraper import get_scraper_instance, run_in_pw_loop
                     pw_scraper = get_scraper_instance()
-                    # wait_for_js=True to ensure JavaScript data loads
                     result = run_in_pw_loop(pw_scraper.get_page_content(base_chapters_url, wait_for_js=True))
-                    # get_page_content returns (content, title) tuple
                     html_content = result[0] if result else None
-                    if not html_content:
-                        logger.warning(f"[RANOBES] Playwright also failed for chapter count")
-                        return None
-                    logger.info(f"[RANOBES] Playwright succeeded for chapter count page")
+                    if html_content:
+                        logger.info(f"[RANOBES] Playwright succeeded for chapter count page")
                 except Exception as pw_err:
                     logger.error(f"[RANOBES] Playwright error for chapter count: {pw_err}")
-                    return None
             
-            if html_content:
-                soup = BeautifulSoup(html_content, 'html.parser')
-                # Log first 500 chars to see what we're getting
-                logger.info(f"[RANOBES] HTML preview: {html_content[:500]}...")
-            else:
-                soup = BeautifulSoup(resp.content, 'html.parser')
+            if not html_content:
+                logger.warning(f"[RANOBES] All fetch methods failed for chapter count")
+                return None
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
+            # Log first 500 chars to see what we're getting
+            logger.info(f"[RANOBES] HTML preview: {html_content[:500]}...")
+            
             dle_content = soup.find("div", id="dle-content")
             if not dle_content:
                 # Debug: check what divs actually exist
@@ -1624,18 +1638,27 @@ class Scraper:
                     links.extend(latest)
 
             if not links:
-                novel_resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
+                novel_html = None
                 novel_soup = None
-                if novel_resp:
-                    novel_soup = BeautifulSoup(novel_resp.content, 'html.parser')
-                else:
-                    # Fallback to Playwright for novel page
+                
+                # Try FlareSolverr first
+                if self.flaresolverr_enabled:
+                    novel_html = self._fetch_with_flaresolverr(url)
+                    if novel_html:
+                        novel_soup = BeautifulSoup(novel_html, 'html.parser')
+                
+                # Fallback to regular request
+                if not novel_soup:
+                    novel_resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
+                    if novel_resp:
+                        novel_soup = BeautifulSoup(novel_resp.content, 'html.parser')
+                
+                # Fallback to Playwright
+                if not novel_soup:
                     try:
                         from playwright_scraper import get_scraper_instance, run_in_pw_loop
                         pw_scraper = get_scraper_instance()
-                        # wait_for_js=True to ensure JavaScript data loads
                         result = run_in_pw_loop(pw_scraper.get_page_content(url, wait_for_js=True))
-                        # get_page_content returns (content, title) tuple
                         novel_html = result[0] if result else None
                         if novel_html:
                             novel_soup = BeautifulSoup(novel_html, 'html.parser')
@@ -1724,40 +1747,43 @@ class Scraper:
         """Get Ranobes metadata including cover, author, genre, translator, status, chapters."""
         try:
             logger.info(f"Fetching Ranobes metadata for {url}")
-
-            resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
+            
             html_content = None
             
-            if not resp:
-                # Fallback to Playwright if regular requests fail
-                logger.info(f"[RANOBES] Regular fetch failed, trying Playwright for metadata: {url}")
+            # Try FlareSolverr first (best for Cloudflare bypass)
+            if self.flaresolverr_enabled:
+                html_content = self._fetch_with_flaresolverr(url)
+                if html_content:
+                    logger.info(f"[RANOBES] FlareSolverr succeeded for metadata: {url}")
+            
+            # Fallback to regular requests
+            if not html_content:
+                resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
+                if resp:
+                    html_content = resp.text
+            
+            # Fallback to Playwright if still no content
+            if not html_content:
+                logger.info(f"[RANOBES] Trying Playwright fallback for metadata: {url}")
                 try:
                     from playwright_scraper import get_scraper_instance, run_in_pw_loop
                     pw_scraper = get_scraper_instance()
-                    # wait_for_js=True to ensure JavaScript data loads
                     result = run_in_pw_loop(pw_scraper.get_page_content(url, wait_for_js=True))
-                    # get_page_content returns (content, title) tuple
                     html_content = result[0] if result else None
-                    if not html_content:
-                        logger.error(f"[RANOBES] Playwright also failed for metadata: {url}")
-                        return {
-                            'title': 'Unknown',
-                            'total_chapters': 500,
-                            'error': 'Failed to fetch URL'
-                        }
-                    logger.info(f"[RANOBES] Playwright succeeded for metadata: {url}")
+                    if html_content:
+                        logger.info(f"[RANOBES] Playwright succeeded for metadata: {url}")
                 except Exception as pw_err:
                     logger.error(f"[RANOBES] Playwright error for metadata: {pw_err}")
-                    return {
-                        'title': 'Unknown',
-                        'total_chapters': 500,
-                        'error': 'Failed to fetch URL'
-                    }
             
-            if html_content:
-                soup = BeautifulSoup(html_content, 'html.parser')
-            else:
-                soup = BeautifulSoup(resp.content, 'html.parser')
+            if not html_content:
+                logger.error(f"[RANOBES] All fetch methods failed for metadata: {url}")
+                return {
+                    'title': 'Unknown',
+                    'total_chapters': 500,
+                    'error': 'Failed to fetch URL'
+                }
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
             title = self._extract_title(soup, url)
             count = self._count_ranobes_chapters(url) or 500
 
@@ -2322,14 +2348,27 @@ class Scraper:
             slug = slug_match.group(1).lower() if slug_match else None
             base_chapters_url = f"https://ranobes.net/chapters/{novel_id}/"
 
-            # 2. Fetch Page 1 to get the Data
+            # 2. Fetch Page 1 to get the Data - try FlareSolverr first
             logger.info(f"Fetching Page 1 data from {base_chapters_url}")
-            resp = self._get_with_retry(
-                base_chapters_url,
-                rotate_on_block=True,
-                rotate_per_attempt=True,
-            )
-            soup = BeautifulSoup(resp.content, 'html.parser') if resp else None
+            html_content = None
+            
+            # Try FlareSolverr first
+            if self.flaresolverr_enabled:
+                html_content = self._fetch_with_flaresolverr(base_chapters_url)
+                if html_content:
+                    logger.info("[Ranobes] FlareSolverr succeeded for page 1")
+            
+            # Fallback to regular requests
+            if not html_content:
+                resp = self._get_with_retry(
+                    base_chapters_url,
+                    rotate_on_block=True,
+                    rotate_per_attempt=True,
+                )
+                if resp:
+                    html_content = resp.text
+            
+            soup = BeautifulSoup(html_content, 'html.parser') if html_content else None
 
             # 3. Extract JSON Data for precise calculation
             total_chapters = 0
@@ -2645,9 +2684,22 @@ class Scraper:
 
     def _fetch_ranobes_page_links(self, url: str) -> List[str]:
         """Helper for worker threads to fetch a single page"""
-        resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
-        if not resp: return []
-        soup = BeautifulSoup(resp.content, 'html.parser')
+        html_content = None
+        
+        # Try FlareSolverr first
+        if self.flaresolverr_enabled:
+            html_content = self._fetch_with_flaresolverr(url)
+        
+        # Fallback to regular requests
+        if not html_content:
+            resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
+            if resp:
+                html_content = resp.text
+        
+        if not html_content:
+            return []
+        
+        soup = BeautifulSoup(html_content, 'html.parser')
         return self._extract_ranobes_links_from_soup(soup)
 
     def _extract_ranobes_links_from_soup(self, soup) -> List[str]:
@@ -2767,15 +2819,30 @@ class Scraper:
 
             rotate_ranobes = 'ranobes' in url
             rotate_per_attempt = rotate_ranobes
-
-            resp = self._get_with_retry(
-                url,
-                referer=referer,
-                rotate_on_block=rotate_ranobes,
-                rotate_per_attempt=rotate_per_attempt,
-            )
-            if not resp:
-                # Try browser-based fallback for protected sites if enabled
+            
+            html_content = None
+            soup = None
+            
+            # Try FlareSolverr first for Ranobes
+            if 'ranobes' in url and self.flaresolverr_enabled:
+                html_content = self._fetch_with_flaresolverr(url)
+                if html_content:
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    logger.info(f"[Chapter] FlareSolverr succeeded for chapter {chapter_num}")
+            
+            # Fallback to regular requests
+            if not soup:
+                resp = self._get_with_retry(
+                    url,
+                    referer=referer,
+                    rotate_on_block=rotate_ranobes,
+                    rotate_per_attempt=rotate_per_attempt,
+                )
+                if resp:
+                    soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # Try browser-based fallback for protected sites
+            if not soup:
                 if self.use_playwright and ('novelbin' in url or 'ranobes' in url):
                     logger.info(f"[Chapter] Trying Playwright fallback for chapter {chapter_num}")
                     try:
@@ -2787,17 +2854,14 @@ class Scraper:
                             logger.info(f"[Playwright] Successfully fetched chapter {chapter_num}")
                         else:
                             logger.warning(f"[Chapter] Playwright also blocked for chapter {chapter_num}")
-                            return None
                     except Exception as e:
                         logger.warning(f"[Playwright] Failed to fetch chapter {chapter_num}: {e}")
-                        return None
-                else:
-                    logger.warning(
-                        f"[Chapter] Failed to fetch chapter URL after retries: {url}"
-                    )
-                    return None
-            else:
-                soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            if not soup:
+                logger.warning(
+                    f"[Chapter] Failed to fetch chapter URL after all methods: {url}"
+                )
+                return None
             
             # Check for anti-bot/rate limit page (common on ranobes)
             page_text = soup.get_text()[:500].lower()
@@ -3067,6 +3131,68 @@ class Scraper:
             return chapter_data
         except Exception as e:
             logger.error(f"Error downloading chapter {url}: {e}")
+            return None
+
+    def _fetch_with_flaresolverr(self, url: str, max_timeout: int = 60000) -> Optional[str]:
+        """Fetch URL using FlareSolverr to bypass Cloudflare protection.
+        
+        Returns the HTML content as a string, or None if failed.
+        """
+        if not self.flaresolverr_enabled:
+            return None
+        
+        try:
+            payload = {
+                "cmd": "request.get",
+                "url": url,
+                "maxTimeout": max_timeout
+            }
+            
+            logger.info(f"[FlareSolverr] Requesting: {url}")
+            resp = requests.post(
+                self.flaresolverr_url,
+                json=payload,
+                timeout=max_timeout // 1000 + 10  # Add buffer to timeout
+            )
+            
+            if resp.status_code != 200:
+                logger.warning(f"[FlareSolverr] HTTP error: {resp.status_code}")
+                return None
+            
+            data = resp.json()
+            
+            if data.get("status") != "ok":
+                logger.warning(f"[FlareSolverr] Request failed: {data.get('message', 'Unknown error')}")
+                return None
+            
+            solution = data.get("solution", {})
+            html = solution.get("response", "")
+            status_code = solution.get("status", 0)
+            
+            if status_code >= 400:
+                logger.warning(f"[FlareSolverr] Got status {status_code} for {url}")
+                return None
+            
+            if not html or len(html) < 500:
+                logger.warning(f"[FlareSolverr] Empty or too short response for {url}")
+                return None
+            
+            # Check for Cloudflare challenge still present
+            if 'Just a moment' in html or 'cf-browser-verification' in html:
+                logger.warning(f"[FlareSolverr] Cloudflare challenge still present")
+                return None
+            
+            logger.info(f"[FlareSolverr] Success for {url} ({len(html)} bytes)")
+            return html
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"[FlareSolverr] Timeout for {url}")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"[FlareSolverr] Connection error - is FlareSolverr running?")
+            return None
+        except Exception as e:
+            logger.error(f"[FlareSolverr] Error: {e}")
             return None
 
     def _get_with_retry(self, url: str, referer: Optional[str] = None, max_retries: int = None, rotate_per_attempt: bool = False, rotate_on_block: bool = False) -> Optional[requests.Response]:

@@ -1,10 +1,24 @@
 version: '3.8'
 
 services:
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - TZ=UTC
+    ports:
+      - "8191:8191"
+    restart: unless-stopped
+    mem_limit: 1g
+
   groogybot:
     build: .
     container_name: groogybot
     restart: unless-stopped
+    depends_on:
+      - flaresolverr
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - DISCORD_SERVER_ID=${DISCORD_SERVER_ID}
@@ -12,6 +26,7 @@ services:
       - SHRINKME_API_KEY=${SHRINKME_API_KEY:-}
       - SHRINKEARN_API_KEY=${SHRINKEARN_API_KEY:-}
       - PROXY_URL=${PROXY_URL:-}
+      - FLARESOLVERR_URL=http://flaresolverr:8191/v1
     volumes:
       # Persist cookies between restarts
       - ./cookies.json:/app/cookies.json
