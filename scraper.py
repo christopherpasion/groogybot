@@ -2170,11 +2170,12 @@ class Scraper:
                     'status': 'in_progress'
                 })
             
-            # Ranobes chapter content works with regular requests (only list pages need FlareSolverr)
+            # Ranobes: Use sequential downloads to avoid FlareSolverr parallel caching bug
+            # (same session + parallel requests = identical cached responses)
             chapter_workers = self.parallel_workers
             if 'ranobes' in url:
-                chapter_workers = min(10, self.parallel_workers)  # 10 parallel workers for Ranobes
-                logger.info(f"[Ranobes] Using {chapter_workers} parallel workers for chapter downloads")
+                chapter_workers = 1  # Sequential to avoid FlareSolverr returning same cached content
+                logger.info(f"[Ranobes] Using sequential chapter downloads (FlareSolverr cache workaround)")
             
             with ThreadPoolExecutor(
                     max_workers=chapter_workers) as executor:
@@ -3015,11 +3016,12 @@ class Scraper:
                     # Remove Ranobes watermarks (various Unicode obfuscated versions)
                     watermark_patterns = [
                         r'ŖᴀNÕḂĒŚ',
+                        r'ᴀNÖᛒÈꞨ',  # New variant found
                         r'RANOBES',
                         r'Ranobes',
                         r'ranobes',
                         r'ᖇᗩᑎOᗷᗴᔕ',
-                        r'[ŖR][ᴀAa][NÑ][OÕ][BḂ][EĒ][SŚ]',  # Mixed Unicode variants
+                        r'[ŖR][ᴀAa][NÑÖ][OÕ][BḂᛒ][EĒÈ][SŚꞨ]',  # Mixed Unicode variants (expanded)
                         r'R\s*A\s*N\s*O\s*B\s*E\s*S',  # Spaced out
                     ]
                     for pattern in watermark_patterns:
