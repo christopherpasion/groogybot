@@ -1267,3 +1267,261 @@ def create_pdf(novel_data, user_id: str = None, user_tier: str = 'verified'):
     doc.build(story)
     logger.info(f"PDF created in {time.time() - pdf_start:.2f}s: {filename}")
     return filename
+
+
+# ============== FILE UPLOAD UTILITIES ==============
+# Discord file size limit (8MB for non-Nitro)
+DISCORD_FILE_LIMIT = 8 * 1024 * 1024  # 8MB
+
+
+def upload_to_catbox(filepath: str, timeout: int = 300) -> Optional[str]:
+    """Upload file to Catbox.moe (permanent hosting, 200MB limit)"""
+    try:
+        with open(filepath, 'rb') as f:
+            files = {'fileToUpload': (os.path.basename(filepath), f)}
+            data = {'reqtype': 'fileupload'}
+            resp = requests.post('https://catbox.moe/user/api.php', files=files, data=data, timeout=timeout)
+
+            if resp.status_code == 200 and resp.text.startswith('https://'):
+                url = resp.text.strip()
+                logger.info(f"Uploaded to Catbox: {url}")
+
+                # Verify the file is accessible
+                try:
+                    import time
+                    time.sleep(1)  # Wait for file to be available
+                    verify_resp = requests.head(url, timeout=15, allow_redirects=True)
+                    if verify_resp.status_code == 200:
+                        content_length = verify_resp.headers.get('Content-Length', '0')
+                        if int(content_length) > 1000:
+                            logger.info(f"Catbox file verified: {content_length} bytes")
+                            return url
+                        else:
+                            logger.warning(f"Catbox file too small or empty: {content_length} bytes")
+                    else:
+                        logger.warning(f"Catbox file not accessible: HTTP {verify_resp.status_code}")
+                except Exception as ve:
+                    logger.warning(f"Catbox verification failed: {ve}")
+                    # Return URL anyway if verification fails (might still work)
+                    return url
+    except requests.exceptions.Timeout:
+        logger.warning("Catbox upload timed out")
+    except Exception as e:
+        logger.error(f"Catbox upload failed: {e}")
+    return None
+
+
+def upload_to_litterbox(filepath: str, expiry: str = "72h", timeout: int = 300) -> Optional[str]:
+    """Upload file to Litterbox (temporary hosting, expires after set time)
+    expiry options: 1h, 12h, 24h, 72h (default)
+    """
+    try:
+        with open(filepath, 'rb') as f:
+            files = {'fileToUpload': (os.path.basename(filepath), f)}
+            data = {'reqtype': 'fileupload', 'time': expiry}
+            resp = requests.post('https://litterbox.catbox.moe/resources/internals/api.php',
+                               files=files, data=data, timeout=timeout)
+
+            if resp.status_code == 200 and resp.text.startswith('https://'):
+                logger.info(f"Uploaded to Litterbox: {resp.text}")
+                return resp.text.strip()
+    except requests.exceptions.Timeout:
+        logger.warning("Litterbox upload timed out")
+    except Exception as e:
+        logger.error(f"Litterbox upload failed: {e}")
+    return None
+
+
+def upload_to_gofile(filepath: str, timeout: int = 300) -> Optional[str]:
+    """Upload file to GoFile (temporary hosting, no limit)"""
+    try:
+        # Get server
+        server_resp = requests.get('https://api.gofile.io/servers', timeout=15)
+        if server_resp.status_code != 200:
+            return None
+
+        servers = server_resp.json().get('data', {}).get('servers', [])
+        if not servers:
+            return None
+
+        server = servers[0].get('name', 'store1')
+
+        # Upload file
+        with open(filepath, 'rb') as f:
+            files = {'file': (os.path.basename(filepath), f)}
+            resp = requests.post(f'https://{server}.gofile.io/uploadFile',
+                               files=files, timeout=timeout)
+
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get('status') == 'ok':
+                    data = result.get('data', {})
+                    download_url = data.get('downloadPage', '')
+                    if download_url:
+                        logger.info(f"Uploaded to GoFile: {download_url}")
+                        return download_url
+    except requests.exceptions.Timeout:
+        logger.warning("GoFile upload timed out")
+    except Exception as e:
+        logger.error(f"GoFile upload failed: {e}")
+    return None
+
+
+def upload_to_transfersh(filepath: str, timeout: int = 600) -> Optional[str]:
+    """Upload file to Transfer.sh (10GB max, 14 days storage, direct download)"""
+    try:
+        filename = os.path.basename(filepath)
+        with open(filepath, 'rb') as f:
+            # Use PUT method with --upload-file equivalent
+            resp = requests.put(
+                f'https://transfer.sh/{filename}',
+                data=f,
+                headers={
+                    'Max-Days': '14',
+                    'Content-Type': 'application/octet-stream'
+                },
+                timeout=timeout
+            )
+
+            if resp.status_code == 200 and resp.text.startswith('https://'):
+                url = resp.text.strip()
+                logger.info(f"Uploaded to Transfer.sh: {url}")
+                return url
+    except requests.exceptions.Timeout:
+        logger.warning("Transfer.sh upload timed out")
+    except Exception as e:
+        logger.error(f"Transfer.sh upload failed: {e}")
+    return None
+
+
+def upload_to_pixeldrain(filepath: str, timeout: int = 600) -> Optional[str]:
+    """Upload file to Pixeldrain (20GB max, direct download)"""
+    try:
+        filename = os.path.basename(filepath)
+        file_size = os.path.getsize(filepath)
+        # Increase timeout for large files: 300s base + 1s per 100MB
+        calculated_timeout = max(300, timeout + (file_size // (100 * 1024 * 1024)))
+
+        with open(filepath, 'rb') as f:
+            files = {'file': (filename, f)}
+            resp = requests.post('https://pixeldrain.com/api/file', files=files, timeout=calculated_timeout)
+
+            if resp.status_code == 201:
+                result = resp.json()
+                file_id = result.get('id', '')
+                if file_id:
+                    url = f"https://pixeldrain.com/u/{file_id}"
+                    logger.info(f"Uploaded to Pixeldrain: {url}")
+                    return url
+    except requests.exceptions.Timeout:
+        logger.warning(f"Pixeldrain upload timed out (file size: {os.path.getsize(filepath) / (1024*1024):.1f}MB)")
+    except Exception as e:
+        logger.error(f"Pixeldrain upload failed: {e}")
+    return None
+
+
+def upload_to_0x0(filepath: str, timeout: int = 600) -> Optional[str]:
+    """Upload file to 0x0.st (512MB max, expires based on size)"""
+    try:
+        file_size = os.path.getsize(filepath)
+        if file_size > 512 * 1024 * 1024:  # 512MB limit
+            logger.warning("File too large for 0x0.st (512MB limit)")
+            return None
+
+        with open(filepath, 'rb') as f:
+            files = {'file': (os.path.basename(filepath), f)}
+            resp = requests.post('https://0x0.st', files=files, timeout=timeout)
+
+            if resp.status_code == 200 and resp.text.startswith('https://'):
+                url = resp.text.strip()
+                logger.info(f"Uploaded to 0x0.st: {url}")
+                return url
+    except requests.exceptions.Timeout:
+        logger.warning("0x0.st upload timed out")
+    except Exception as e:
+        logger.error(f"0x0.st upload failed: {e}")
+    return None
+
+
+def upload_large_file(filepath: str, progress_callback=None, skip_hosts: list = None) -> Tuple[Optional[str], str]:
+    """Upload large file to external hosting. Returns (url, service_name) or (None, error)
+
+    Priority order: Most reliable services first
+    progress_callback: Optional function that takes (service_name, status) for progress updates
+    skip_hosts: List of host names to skip (for retry with different host)
+    """
+    file_size = os.path.getsize(filepath)
+    file_size_mb = file_size / (1024 * 1024)
+    skip_hosts = skip_hosts or []
+
+    # Normalize skip_hosts to simple names for comparison
+    skip_names = [h.split(' ')[0].lower() for h in skip_hosts]
+
+    logger.info(f"Uploading {file_size_mb:.1f}MB file to external host... (skipping: {skip_names})")
+
+    # 1. Pixeldrain FIRST - very reliable, 20GB max, direct download
+    if 'pixeldrain' not in skip_names:
+        if progress_callback:
+            progress_callback("Pixeldrain", "uploading")
+        url = upload_to_pixeldrain(filepath)
+        if url:
+            if progress_callback:
+                progress_callback("Pixeldrain", "success")
+            return url, "Pixeldrain (direct download)"
+        if progress_callback:
+            progress_callback("Pixeldrain", "failed")
+
+    # 2. 0x0.st (512MB max, direct download)
+    if '0x0.st' not in skip_names and file_size < 512 * 1024 * 1024:
+        if progress_callback:
+            progress_callback("0x0.st", "uploading")
+        url = upload_to_0x0(filepath)
+        if url:
+            if progress_callback:
+                progress_callback("0x0.st", "success")
+            return url, "0x0.st (direct download)"
+        if progress_callback:
+            progress_callback("0x0.st", "failed")
+
+    # 3. Litterbox (direct download, 72h expiry)
+    if 'litterbox' not in skip_names:
+        if progress_callback:
+            progress_callback("Litterbox", "uploading")
+        url = upload_to_litterbox(filepath, "72h")
+        if url:
+            if progress_callback:
+                progress_callback("Litterbox", "success")
+            return url, "Litterbox (expires in 72 hours)"
+        if progress_callback:
+            progress_callback("Litterbox", "failed")
+
+    # 4. GoFile (unlimited size, requires clicking download)
+    if 'gofile' not in skip_names:
+        if progress_callback:
+            progress_callback("GoFile", "uploading")
+        url = upload_to_gofile(filepath)
+        if url:
+            if progress_callback:
+                progress_callback("GoFile", "success")
+            return url, "GoFile (click 'Download' on page)"
+        if progress_callback:
+            progress_callback("GoFile", "failed")
+
+    # 5. Transfer.sh (often unreachable)
+    if 'transfer.sh' not in skip_names:
+        if progress_callback:
+            progress_callback("Transfer.sh", "uploading")
+        url = upload_to_transfersh(filepath)
+        if url:
+            if progress_callback:
+                progress_callback("Transfer.sh", "success")
+            return url, "Transfer.sh (expires in 14 days)"
+        if progress_callback:
+            progress_callback("Transfer.sh", "failed")
+
+    return None, "All upload services failed"
+
+
+def is_file_too_large_for_discord(filepath: str) -> bool:
+    """Check if file exceeds Discord's upload limit"""
+    return os.path.getsize(filepath) > DISCORD_FILE_LIMIT

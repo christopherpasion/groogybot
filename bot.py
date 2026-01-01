@@ -23,8 +23,7 @@ import time
 import math
 import requests
 from scraper import Scraper, is_protected_site
-from utils import create_epub, create_pdf
-from manga_utils import upload_large_file, is_file_too_large_for_discord
+from utils import create_epub, create_pdf, upload_large_file, is_file_too_large_for_discord
 from user_settings import settings_manager, get_user_settings, get_setting, set_setting, get_style_css, get_settings_display, EPUB_STYLES
 from download_history import history_manager, add_download, get_history, get_last_download, get_library, check_duplicate, get_stats
 from typing import Optional, Dict, Tuple
@@ -106,7 +105,7 @@ SHRINKEARN_API_KEY = os.getenv('SHRINKEARN_API_KEY', '')
 
 # Ad-free upgrade message for free users
 AD_FREE_MESSAGE = (
-    "Tired of annoying ads? Want to enjoy all your favorite webnovels or manga on the Bot?\n"
+    "Tired of annoying ads? Want to enjoy all your favorite webnovels on the Bot?\n"
     "Support Meowi's Tea and Coffee on Patreon for just $1/month and enjoy an ad-free experience!\n"
     "https://www.patreon.com/c/meowisteaandcoffee/membership")
 
@@ -277,9 +276,7 @@ WORKERS_SPONSOR = 100  # Sponsor: 100 chapters at a time (maximum speed)
 # Coffee: 80% of total chapters (max 1000/day) + daily bonus
 # Catnip/Sponsor: Unlimited
 DAILY_BONUS_NOVEL_VERIFIED = 200  # +200 novel chapters/day for Verified
-DAILY_BONUS_MANGA_VERIFIED = 30  # +30 manga chapters/day for Verified
 DAILY_BONUS_NOVEL_COFFEE = 1000  # +1000 novel chapters/day for Coffee
-DAILY_BONUS_MANGA_COFFEE = 150  # +150 manga chapters/day for Coffee
 
 # GMT+8 timezone offset
 import pytz
@@ -490,34 +487,9 @@ class NovelBot(discord.Client):
 - YongLibrary
 - EnglishNovelsFree"""
 
-            manga_sites = """**Supported Manga Sites (21)**
-
-**Primary Sites:**
-- AsuraComic (asuracomic.net)
-- MangaDex (mangadex.org)
-- MangaPark (mangapark.net)
-- MangaPill (mangapill.com)
-- MangaBuddy (mangabuddy.com)
-
-**Additional Sites:**
-- MangaHere
-- MangaFox / FanFox
-- Mangago
-- Mangamya
-- VIZ (viz.com)
-- MagiManga
-- MangaRead
-- MangaToto
-- ManhuaUS
-- InfiniteMage
-- MangaDass
-- NovaManga
-- MangaPaw
-- DaoTranslate"""
-
             formats = """**Output Formats:**
-- Novels: EPUB or PDF
-- Manga: PDF (all images) or ZIP (organized by chapter)
+- EPUB (default)
+- PDF
 
 **How to Use:**
 1. DM the bot or use your private channel
@@ -533,7 +505,6 @@ Use `\\n` for new lines when using /edit command."""
             try:
                 # Post each section as separate messages
                 await interaction.channel.send(novel_sites)
-                await interaction.channel.send(manga_sites)
                 await interaction.channel.send(formats)
 
                 await interaction.followup.send("Supported sites list posted!",
@@ -921,9 +892,7 @@ Use `\\n` for new lines when using /edit command."""
 
         # API-based stats are set to 0 or placeholders since web server is disabled
         stats['novels_today'] = 0
-        stats['manga_today'] = 0
         stats['novels_alltime'] = 0
-        stats['manga_alltime'] = 0
 
         # 6. Active jobs - count from user_states
         try:
@@ -1042,9 +1011,7 @@ Use `\\n` for new lines when using /edit command."""
         """
         return {
             'novel_used': 0,
-            'manga_used': 0,
             'novel_bonus_used': 0,
-            'manga_bonus_used': 0,
         }
 
     def _normalize_novel_key(self, url: str) -> str:
@@ -1118,9 +1085,7 @@ Use `\\n` for new lines when using /edit command."""
     async def _update_daily_usage(self,
                                   user_id: str,
                                   novel_chapters: int = 0,
-                                  manga_chapters: int = 0,
-                                  novel_bonus_used: int = 0,
-                                  manga_bonus_used: int = 0):
+                                  novel_bonus_used: int = 0):
         """Update user's daily chapter usage in database including bonus usage tracking"""
         today = get_gmt8_date()
         try:
@@ -1129,9 +1094,7 @@ Use `\\n` for new lines when using /edit command."""
                               'discordUserId': user_id,
                               'date': today,
                               'novelChapters': novel_chapters,
-                              'mangaChapters': manga_chapters,
-                              'novelBonusUsed': novel_bonus_used,
-                              'mangaBonusUsed': manga_bonus_used
+                              'novelBonusUsed': novel_bonus_used
                           },
                           timeout=5)
         except Exception as e:
@@ -1160,10 +1123,7 @@ Use `\\n` for new lines when using /edit command."""
         # if tier in ('catnip', 'sponsor'):
         #     return {'max_allowed': 999999, 'daily_bonus': 0, 'percent_limit': 999999, 'percent': 100, 'is_unlimited': True}
         #
-        # if content_type == 'novel':
-        #     bonus = DAILY_BONUS_NOVEL_COFFEE if tier == 'coffee' else DAILY_BONUS_NOVEL_VERIFIED
-        # else:  # manga
-        #     bonus = DAILY_BONUS_MANGA_COFFEE if tier == 'coffee' else DAILY_BONUS_MANGA_VERIFIED
+        # bonus = DAILY_BONUS_NOVEL_COFFEE if tier == 'coffee' else DAILY_BONUS_NOVEL_VERIFIED
         #
         # if tier == 'coffee':
         #     # Coffee: 80% of total + bonus (no daily cap)
@@ -1246,10 +1206,7 @@ Use `\\n` for new lines when using /edit command."""
         # novel_usage = await self._get_novel_usage(user_id, novel_key)
         # used_this_novel = novel_usage.get('chapters_used', 0)
         # daily_usage = await self._get_daily_usage(user_id)
-        # if content_type == 'novel':
-        #     bonus_used_today = daily_usage.get('novel_bonus_used', 0)
-        # else:
-        #     bonus_used_today = daily_usage.get('manga_bonus_used', 0)
+        # bonus_used_today = daily_usage.get('novel_bonus_used', 0)
         # limit_info = self._calculate_limit(tier, total_chapters, content_type)
         # percent_limit = limit_info['percent_limit']
         # daily_bonus = limit_info['daily_bonus']
@@ -1305,25 +1262,19 @@ Use `\\n` for new lines when using /edit command."""
     def _format_remaining_text(self,
                                tier: str,
                                usage: Dict,
-                               novel_total: int = 0,
-                               manga_total: int = 0) -> str:
+                               novel_total: int = 0) -> str:
         """Format remaining chapters text for display"""
         if tier in ('catnip', 'sponsor'):
             return "**Unlimited** downloads available"
 
         novel_limit = self._calculate_limit(
             tier, novel_total, 'novel')['max_allowed'] if novel_total else 0
-        manga_limit = self._calculate_limit(
-            tier, manga_total, 'manga')['max_allowed'] if manga_total else 0
 
         novel_remaining = max(
             0, novel_limit -
             usage.get('novel_used', 0)) if novel_total else "N/A"
-        manga_remaining = max(
-            0, manga_limit -
-            usage.get('manga_used', 0)) if manga_total else "N/A"
 
-        return f"**Remaining today:** Novel: {novel_remaining} | Manga: {manga_remaining}"
+        return f"**Remaining today:** {novel_remaining} chapters"
 
     def _has_role(self, member: discord.Member, role_name: str) -> bool:
         """Check if member has a specific role (case-insensitive)"""
@@ -2182,11 +2133,10 @@ Use `\\n` for new lines when using /edit command."""
                          exc_info=True)
 
     def _detect_input_type(self, user_input: str) -> str:
-        """Detect if input is a URL or title, and if URL is novel or manga"""
+        """Detect if input is a URL or title"""
         url = user_input.strip()
         if re.match(r'^https?://', url):
-            # Check if it's a manga URL
-            return 'url'  # Novel URL
+            return 'url'
         return 'title'
 
     def _parse_chapter_range(self,
@@ -2865,7 +2815,7 @@ Use `\\n` for new lines when using /edit command."""
                     "Reply `1` or `2`" + HINT_TEXT)
 
             else:  # input_type == 'title'
-                # Direct novel search (manga disabled)
+                # Title search
                 logger.info(f"Title search: {user_input}")
                 state['data']['search_query'] = user_input
                 await message.channel.send(f"🔍 Searching for '{user_input}'...")
@@ -4180,1012 +4130,6 @@ Use `\\n` for new lines when using /edit command."""
             except Exception as e:
                 logger.error(f"Error during confirmed scrape: {e}")
                 await message.channel.send(f"**Error:** {str(e)}")
-                if message.author.id in self.user_states:
-                    del self.user_states[message.author.id]
-
-        # ========== MANGA/NOVEL TYPE SELECTION ==========
-        elif step == 'waiting_for_content_type':
-            user_choice = message.content.strip().lower()
-            search_query = state['data'].get('search_query', '')
-
-            # Handle back/cancel
-            if user_choice == 'back':
-                state['step'] = 'awaiting_welcome_ack'
-                await message.channel.send(
-                    "↩️ Going back. Please enter a title or URL:")
-                return
-            if user_choice == 'cancel':
-                del self.user_states[message.author.id]
-                await message.channel.send(
-                    "Cancelled. Type anything to start again.")
-                return
-
-            if user_choice == '1':
-                # Novel search
-                state['data']['content_type'] = 'novel'
-                await message.channel.send(
-                    f"Searching for '{search_query}' in novels...")
-                results = await self._search_with_choices(
-                    search_query, message)
-
-                if results:
-                    if len(results) == 1:
-                        novel = results[0]
-                        state['data']['selected_novel'] = novel
-                        state['step'] = 'waiting_for_source_choice'
-
-                        sources = novel.get('sources', [])
-                        if not sources:
-                            await message.channel.send(
-                                f"No sources found for '{novel.get('title', 'Unknown')}'. Please try another search or provide a direct URL."
-                            )
-                            del self.user_states[message.author.id]
-                            return
-                        sources_text = f"✅ **{novel.get('title', 'Unknown')}**\n\n**Source:**\n"
-                        for i, src in enumerate(sources, 1):
-                            sources_text += f"{i}. {src.get('source', 'Unknown')}\n"
-                        sources_text += f"\nReply `1-{len(sources)}`" + HINT_TEXT
-                        await message.channel.send(sources_text)
-                    else:
-                        state['data']['search_results'] = results
-                        state['step'] = 'waiting_for_novel_choice'
-
-                        choices_text = "**Found multiple novels!** Pick one:\n\n"
-                        for i, result in enumerate(results, 1):
-                            source_count = len(result.get('sources', []))
-                            sources_list = ", ".join([src['source'] for src in result.get('sources', [])])
-                            choices_text += f"**{i}.** {result['title']}\n   ({source_count} {'site' if source_count == 1 else 'sites'}: {sources_list})\n\n"
-                        choices_text += f"Reply with a number (1-{len(results)})" + HINT_TEXT
-                        await message.channel.send(choices_text)
-                else:
-                    await message.channel.send(
-                        "Novel not found. Please try another search or provide a direct URL."
-                    )
-                    del self.user_states[message.author.id]
-
-            elif user_choice == '2':
-                # Manga search
-                state['data']['content_type'] = 'manga'
-                await message.channel.send(
-                    f"Searching for '{search_query}' in manga sites...")
-
-                try:
-                    manga_results = await self.loop.run_in_executor(
-                        None, self.manga_scraper.search_manga, search_query)
-
-                    if manga_results:
-                        state['data']['manga_search_results'] = manga_results
-                        state['step'] = 'waiting_for_manga_choice'
-
-                        choices_text = "**Found manga!** Pick one:\n\n"
-                        for i, result in enumerate(manga_results, 1):
-                            choices_text += f"**{i}.** {result['title']}\n   Source: {result.get('source', 'Unknown')}\n"
-                        choices_text += f"\nReply with a number (1-{len(manga_results)})" + HINT_TEXT
-                        await message.channel.send(choices_text)
-                    else:
-                        await message.channel.send(
-                            "Manga not found. Please try another search or provide a direct URL."
-                        )
-                        del self.user_states[message.author.id]
-                except Exception as e:
-                    logger.error(f"Manga search error: {e}")
-                    await message.channel.send(f"Search failed: {e}")
-                    del self.user_states[message.author.id]
-            else:
-                await message.channel.send(
-                    "Please reply with `1` for Novel or `2` for Manga.")
-
-        # ========== MANGA CHOICE SELECTION ==========
-        elif step == 'waiting_for_manga_choice':
-            user_choice = message.content.strip().lower()
-            manga_results = state['data'].get('manga_search_results', [])
-
-            if user_choice == 'back':
-                state['step'] = 'awaiting_title'
-                await message.channel.send(
-                    "Going back. Please enter a title or URL:")
-                return
-
-            try:
-                choice_num = int(user_choice) - 1
-                if 0 <= choice_num < len(manga_results):
-                    selected_manga = manga_results[choice_num]
-                    state['data']['url'] = selected_manga['url']
-                    state['data']['manga_title'] = selected_manga['title']
-                    state['step'] = 'waiting_for_manga_format'
-
-                    await message.channel.send(
-                        f"✅ **{selected_manga['title']}**\n\n"
-                        "**Format:**\n"
-                        "1. PDF\n"
-                        "2. ZIP\n\n"
-                        "Reply `1` or `2`" + HINT_TEXT)
-                else:
-                    await message.channel.send(
-                        f"Please reply with a number between 1 and {len(manga_results)}."
-                    )
-            except ValueError:
-                await message.channel.send(
-                    f"Please reply with a number between 1 and {len(manga_results)}."
-                )
-
-        # ========== MANGA FORMAT SELECTION ==========
-        elif step == 'waiting_for_manga_format':
-            user_choice = message.content.strip().lower()
-
-            # Handle back/cancel
-            if user_choice == 'back':
-                state['step'] = 'awaiting_welcome_ack'
-                await message.channel.send(
-                    "↩️ Going back. Please enter a manga title or URL:")
-                return
-            if user_choice == 'cancel':
-                del self.user_states[message.author.id]
-                await message.channel.send(
-                    "Cancelled. Type anything to start again.")
-                return
-
-            if user_choice == '1':
-                state['data']['format'] = 'pdf'
-            elif user_choice == '2':
-                state['data']['format'] = 'zip'
-            else:
-                await message.channel.send(
-                    "Please reply with `1` for PDF or `2` for ZIP." +
-                    HINT_TEXT)
-                return
-
-            # Get manga info and chapter count
-            url = state['data'].get('url')
-            await message.channel.send("Fetching manga info...")
-
-            try:
-                manga_info = await self.loop.run_in_executor(
-                    None, self.manga_scraper.get_manga_info, url)
-
-                if 'error' in manga_info:
-                    await message.channel.send(f"Error: {manga_info['error']}")
-                    del self.user_states[message.author.id]
-                    return
-
-                total_chapters = len(manga_info.get('chapters', []))
-                state['data']['manga_info'] = manga_info
-                state['data']['total_chapters'] = total_chapters
-                state['step'] = 'waiting_for_manga_chapters'
-
-                # All users have unlimited downloads
-                limit_text = "**Downloads:** Unlimited"
-                remaining_text = f"\n**Available:** All {total_chapters} chapters"
-
-                # === FUTURE LIMIT IMPLEMENTATION (commented out) ===
-                # user_tier = state.get('user_tier', 'normal')
-                # if user_tier in ('catnip', 'sponsor'):
-                #     limit_text = "**Your Limit:** Unlimited"
-                #     remaining_text = ""
-                # else:
-                #     novel_key = self._normalize_novel_key(url)
-                #     novel_usage = await self._get_novel_usage(str(message.author.id), novel_key)
-                #     used = novel_usage.get('chapters_used', 0)
-                #     daily_usage = await self._get_daily_usage(str(message.author.id))
-                #     bonus_used_today = daily_usage.get('manga_bonus_used', 0)
-                #     limit_info = self._calculate_limit(user_tier, total_chapters, 'manga')
-                #     percent = limit_info['percent']
-                #     percent_limit = limit_info['percent_limit']
-                #     daily_bonus = limit_info['daily_bonus']
-                #     percent_remaining = max(0, percent_limit - used)
-                #     bonus_remaining = max(0, daily_bonus - bonus_used_today)
-                #     max_available = percent_limit + bonus_remaining
-                #     total_remaining = percent_remaining + bonus_remaining
-                #     limit_text = f"**Your Limit:** {percent}% of {total_chapters} chapters = {percent_limit} + {bonus_remaining}/{daily_bonus} bonus = **{max_available} max**"
-                #     if used > 0:
-                #         remaining_text = f"\n**Already Downloaded (this manga):** {used}\n**Bonus Used Today:** {bonus_used_today}/{daily_bonus}\n**Remaining:** {total_remaining} chapters"
-                #     else:
-                #         if bonus_used_today > 0:
-                #             remaining_text = f"\n**Bonus Used Today:** {bonus_used_today}/{daily_bonus}\n**You Can Download:** {max_available} chapters from this manga"
-                #         else:
-                #             remaining_text = f"\n**You Can Download:** {max_available} chapters from this manga"
-
-                await message.channel.send(
-                    f"**{manga_info.get('title', 'Manga')}**\n"
-                    f"Chapters available: {total_chapters}\n\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "**Select Chapter Range**\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"{limit_text}{remaining_text}\n\n"
-                    "**Examples:**\n"
-                    "  `1-10` - Chapters 1 to 10\n"
-                    "  `5` - Just chapter 5\n"
-                    "  `all` - All chapters\n\n"
-                    "Reply with a chapter range:" + HINT_TEXT)
-            except Exception as e:
-                logger.error(f"Error getting manga info: {e}")
-                await message.channel.send(f"Error: {e}")
-                del self.user_states[message.author.id]
-
-        # ========== MANGA CHAPTER RANGE ==========
-        elif step == 'waiting_for_manga_chapters':
-            user_input = message.content.strip().lower()
-            manga_info = state['data'].get('manga_info', {})
-            total_chapters = state['data'].get('total_chapters', 0)
-            fmt = state['data'].get('format', 'pdf')
-            user_tier = state.get('user_tier', 'normal')
-
-            # Handle back/cancel
-            if user_input == 'back':
-                state['step'] = 'waiting_for_manga_format'
-                await message.channel.send("↩️ **Format:**\n"
-                                           "1. PDF | 2. ZIP" +
-                                           HINT_TEXT)
-                return
-            if user_input == 'cancel':
-                del self.user_states[message.author.id]
-                await message.channel.send(
-                    "Cancelled. Type anything to start again.")
-                return
-
-            try:
-                chapter_start, chapter_end = self._parse_chapter_range(
-                    user_input)
-
-                # Handle 'all' case
-                if chapter_end is None:
-                    chapter_end = total_chapters
-
-                # Validate range
-                if chapter_start < 1 or chapter_end > total_chapters:
-                    await message.channel.send(
-                        f"Invalid range. Available: 1-{total_chapters}")
-                    return
-
-                state['data']['chapter_start'] = chapter_start
-                state['data']['chapter_end'] = chapter_end
-
-            except Exception as e:
-                await message.channel.send(
-                    "Invalid chapter range. Try: `1-10`, `5`, or `all`")
-                return
-
-            # Check download limits (per-manga tracking)
-            requested_chapters = chapter_end - chapter_start + 1
-            manga_title = manga_info.get('title', 'Unknown Manga')
-            manga_url = state['data'].get('url', '')
-            limit_check = await self._check_download_allowed(
-                str(message.author.id), user_tier, total_chapters,
-                requested_chapters, 'manga', manga_url, manga_title)
-            state['data']['novel_key'] = limit_check.get('novel_key', '')
-            state['data']['novel_title'] = manga_title
-            state['data'][
-                'limit_check'] = limit_check  # Store for bonus calculation
-
-            if not limit_check['allowed']:
-                await message.channel.send(
-                    f"**Daily Limit Reached**\n{limit_check['message']}")
-                del self.user_states[message.author.id]
-                return
-
-            # Apply limit if needed
-            if limit_check['max_now'] < requested_chapters:
-                chapter_end = chapter_start + limit_check['max_now'] - 1
-                state['data']['chapter_end'] = chapter_end
-                await message.channel.send(
-                    f"**Note:** {limit_check['message']}")
-
-            # Start manga download
-            state['step'] = 'scraping_in_progress'
-            url = state['data'].get('url')
-            title = manga_info.get('title', 'Manga')
-
-            chapter_range = f"{chapter_start}-{chapter_end}" if chapter_end != chapter_start else str(
-                chapter_start)
-            await message.channel.send(
-                f"**Downloading manga...**\n"
-                f"Title: {title}\n"
-                f"Chapters: {chapter_range}\n"
-                f"Format: {fmt.upper()}\n\n"
-                "This may take a while for large chapters...")
-
-            try:
-                start_time = time.time()
-                last_update_time = [start_time]
-                progress_message = [None
-                                    ]  # Store the progress message to edit it
-
-                # Progress callback that edits a single message
-                async def send_progress(msg):
-                    current_time = time.time()
-                    # Throttle updates to every 3 seconds to avoid rate limits
-                    if progress_message[0] is None or (current_time -
-                                                       last_update_time[0]
-                                                       >= 3):
-                        last_update_time[0] = current_time
-                        try:
-                            if progress_message[0] is None:
-                                # Create the first progress message
-                                progress_message[
-                                    0] = await message.channel.send(
-                                        f"**Progress:** {msg}")
-                            else:
-                                # Edit the existing progress message
-                                await progress_message[0].edit(
-                                    content=f"**Progress:** {msg}")
-                        except Exception as e:
-                            logger.debug(f"Progress update error: {e}")
-                    logger.info(f"Manga progress: {msg}")
-
-                def progress_callback(msg):
-                    # Schedule async update on event loop
-                    asyncio.run_coroutine_threadsafe(send_progress(msg),
-                                                     self.loop)
-
-                manga_data = await self.loop.run_in_executor(
-                    None, lambda: self.manga_scraper.download_manga(
-                        url, chapter_start, chapter_end, progress_callback))
-
-                # Extract source domain for tracking
-                manga_source = url.split('/')[2] if '/' in url else 'unknown'
-
-                if 'error' in manga_data:
-                    await message.channel.send(f"Error: {manga_data['error']}")
-                    # Track failed manga request
-                    await track_content_request(title,
-                                                'manga',
-                                                manga_source,
-                                                success=False,
-                                                loop=self.loop)
-                    await log_site_failure(manga_source,
-                                           'manga_error',
-                                           manga_data['error'],
-                                           novel_url=url,
-                                           loop=self.loop)
-                    del self.user_states[message.author.id]
-                    return
-
-                if not manga_data.get('chapters'):
-                    await message.channel.send(
-                        "No chapters were downloaded successfully.")
-                    # Track failed manga request
-                    await track_content_request(title,
-                                                'manga',
-                                                manga_source,
-                                                success=False,
-                                                loop=self.loop)
-                    await log_site_failure(manga_source,
-                                           'no_chapters',
-                                           'No manga chapters downloaded',
-                                           novel_url=url,
-                                           loop=self.loop)
-                    del self.user_states[message.author.id]
-                    return
-
-                # Track successful manga request
-                await track_content_request(title,
-                                            'manga',
-                                            manga_source,
-                                            success=True,
-                                            loop=self.loop)
-
-                # Generate file
-                chapter_count = len(manga_data.get('chapters', []))
-                await message.channel.send(
-                    f"Generating {fmt.upper()} with {chapter_count} chapters..."
-                )
-
-                if fmt == 'pdf':
-                    filename = await self.loop.run_in_executor(
-                        None, create_manga_pdf, manga_data)
-                else:
-                    filename = await self.loop.run_in_executor(
-                        None, create_manga_zip, manga_data)
-
-                # Cleanup temp directory
-                output_dir = manga_data.get('output_dir', '')
-                if output_dir:
-                    await self.loop.run_in_executor(None, cleanup_manga_temp,
-                                                    output_dir)
-
-                # Send file
-                if os.path.exists(filename):
-                    file_size_mb = os.path.getsize(filename) / (1024 * 1024)
-
-                    # Check if file is too large for Discord (proactive upload)
-                    if is_file_too_large_for_discord(filename):
-                        progress_msg = await message.channel.send(
-                            f"**Uploading to external host...**\n"
-                            f"File size: {file_size_mb:.1f}MB\n"
-                            f"Trying: Litterbox...")
-
-                        # Track upload progress
-                        upload_status = {"current": "Litterbox", "tried": []}
-
-                        def update_upload_progress(service, status):
-                            if status == "uploading":
-                                upload_status["current"] = service
-                            elif status == "failed":
-                                upload_status["tried"].append(service)
-
-                        async def update_progress_message():
-                            tried = ", ".join(
-                                upload_status["tried"]
-                            ) if upload_status["tried"] else "None"
-                            current = upload_status["current"]
-                            await progress_msg.edit(
-                                content=(f"**Uploading to external host...**\n"
-                                         f"File size: {file_size_mb:.1f}MB\n"
-                                         f"Trying: {current}...\n"
-                                         f"Failed: {tried}"))
-
-                        # Run upload with progress updates
-                        import functools
-                        upload_func = functools.partial(
-                            upload_large_file, filename,
-                            update_upload_progress)
-
-                        # Start upload task
-                        upload_task = self.loop.run_in_executor(
-                            None, upload_func)
-
-                        # Update message periodically while uploading
-                        while not upload_task.done():
-                            await update_progress_message()
-                            await asyncio.sleep(3)
-
-                        upload_url, service = await upload_task
-
-                        if upload_url:
-                            await progress_msg.edit(
-                                content=f"Upload complete to {service}!")
-                            proper_filename = os.path.basename(filename)
-
-                            # Wrap URL with ShrinkMe ads for free users only (skip hosts with own redirects)
-                            display_url = upload_url
-                            has_ads = False
-                            if user_tier == 'normal':
-                                shortened = await self.loop.run_in_executor(
-                                    None, lambda: shorten_with_shrinkme(
-                                        upload_url, service, user_tier))
-                                if shortened != upload_url:
-                                    display_url = shortened
-                                    has_ads = True
-
-                            embed = discord.Embed(
-                                title="Manga Download Complete",
-                                description=f"**{title}**",
-                                color=discord.Color.blue())
-                            embed.add_field(name="Chapters",
-                                            value=str(chapter_count),
-                                            inline=True)
-                            embed.add_field(name="Format",
-                                            value=fmt.upper(),
-                                            inline=True)
-                            embed.add_field(name="Size",
-                                            value=f"{file_size_mb:.1f}MB",
-                                            inline=True)
-                            embed.add_field(name="Save As",
-                                            value=f"`{proper_filename}`",
-                                            inline=False)
-                            embed.add_field(name="Download Link",
-                                            value=display_url,
-                                            inline=False)
-
-                            if has_ads:
-                                embed.add_field(name="Ad Supported",
-                                                value=AD_FREE_MESSAGE,
-                                                inline=False)
-
-                            embed.set_footer(
-                                text=
-                                f"Hosted on {service} | Rename file after downloading"
-                            )
-                            try:
-                                await message.channel.send(embed=embed)
-                                logger.info(
-                                    f"Manga embed sent to {message.channel} with link: {display_url}"
-                                )
-                            except Exception as e:
-                                logger.error(
-                                    f"Failed to send manga embed: {e}")
-                                await message.channel.send(
-                                    f"Download complete! Link: {display_url}")
-
-                            # Ask if download worked - offer retry with different host
-                            retry_prompt = await message.channel.send(
-                                "**Did the file download successfully?**\n"
-                                "Press `1` to retry with a different file host\n"
-                                "Press `2` or wait 30 seconds to finish")
-
-                            tried_hosts = upload_status.get("tried",
-                                                            []) + [service]
-
-                            def check_retry(m):
-                                return m.author == message.author and m.channel == message.channel and m.content.strip(
-                                ) in ['1', '2']
-
-                            try:
-                                retry_response = await self.wait_for(
-                                    'message', check=check_retry, timeout=30)
-                                if retry_response.content.strip() == '1':
-                                    await retry_prompt.delete()
-                                    retry_msg = await message.channel.send(
-                                        "Retrying with different host...")
-
-                                    # Try alternative hosts
-                                    alt_upload_url, alt_service = await self.loop.run_in_executor(
-                                        None, lambda: upload_large_file(
-                                            filename, skip_hosts=tried_hosts))
-
-                                    if alt_upload_url:
-                                        await retry_msg.delete()
-                                        alt_display_url = alt_upload_url
-                                        if user_tier == 'normal':
-                                            shortened = await self.loop.run_in_executor(
-                                                None,
-                                                lambda: shorten_with_shrinkme(
-                                                    alt_upload_url, alt_service, user_tier
-                                                ))
-                                            if shortened != alt_upload_url:
-                                                alt_display_url = shortened
-
-                                        alt_embed = discord.Embed(
-                                            title="Alternative Download Link",
-                                            description=f"**{title}**",
-                                            color=discord.Color.green())
-                                        alt_embed.add_field(
-                                            name="Download Link",
-                                            value=alt_display_url,
-                                            inline=False)
-                                        alt_embed.set_footer(
-                                            text=f"Hosted on {alt_service}")
-                                        await message.channel.send(
-                                            embed=alt_embed)
-                                        logger.info(
-                                            f"Alternative link sent: {alt_display_url} via {alt_service}"
-                                        )
-                                    else:
-                                        await retry_msg.edit(
-                                            content=
-                                            "No more alternative hosts available. Please try again later."
-                                        )
-                                else:
-                                    await retry_prompt.delete()
-                            except asyncio.TimeoutError:
-                                try:
-                                    await retry_prompt.delete()
-                                except:
-                                    pass
-
-                            # Log to database
-                            duration = int(time.time() - start_time)
-                            await log_download({
-                                'discordUserId':
-                                str(message.author.id),
-                                'discordUsername':
-                                str(message.author.name),
-                                'novelTitle':
-                                f"[MANGA] {title}",
-                                'source':
-                                manga_data.get('source', 'manga'),
-                                'chapterStart':
-                                chapter_start,
-                                'chapterEnd':
-                                chapter_end,
-                                'chapterCount':
-                                chapter_count,
-                                'format':
-                                fmt,
-                                'userTier':
-                                user_tier,
-                                'durationSeconds':
-                                duration,
-                                'status':
-                                'completed'
-                            })
-                            # Track per-manga usage (use URL-based key to prevent bypass)
-                            manga_url = state['data'].get('url', '')
-                            novel_key = state['data'].get(
-                                'novel_key') or self._normalize_novel_key(
-                                    manga_url)
-                            novel_title_stored = state['data'].get(
-                                'novel_title', title)
-                            total_ch = state['data'].get(
-                                'total_chapters', chapter_count)
-                            limit_info = state['data'].get(
-                                'limit_check', {}).get('limit_info', {})
-                            bonus_used = self._calculate_bonus_used(
-                                chapter_count, limit_info)
-                            await self._update_novel_usage(
-                                str(message.author.id), novel_key,
-                                novel_title_stored, total_ch, chapter_count,
-                                'manga')
-                            await self._update_daily_usage(
-                                str(message.author.id),
-                                manga_chapters=chapter_count,
-                                manga_bonus_used=bonus_used)
-                            os.remove(filename)
-                        else:
-                            await progress_msg.edit(
-                                content=
-                                f"Failed to upload to all hosts. File saved locally: `{filename}`"
-                            )
-
-                        # Reset state
-                        if message.author.id in self.user_states:
-                            del self.user_states[message.author.id]
-                        return
-
-                    try:
-                        # For free users, always use external upload + ad links
-                        if user_tier == 'normal':
-                            progress_msg = await message.channel.send(
-                                f"**Uploading...**\n"
-                                f"File size: {file_size_mb:.1f}MB")
-
-                            upload_status = {
-                                "current": "Litterbox",
-                                "tried": []
-                            }
-
-                            def update_upload_progress_manga_small(
-                                    service, status):
-                                if status == "uploading":
-                                    upload_status["current"] = service
-                                elif status == "failed":
-                                    upload_status["tried"].append(service)
-
-                            import functools
-                            upload_func = functools.partial(
-                                upload_large_file, filename,
-                                update_upload_progress_manga_small)
-                            upload_url, service = await self.loop.run_in_executor(
-                                None, upload_func)
-
-                            if upload_url:
-                                await progress_msg.delete()
-                                proper_filename = os.path.basename(filename)
-
-                                # Wrap with ShrinkMe ads
-                                shortened = await self.loop.run_in_executor(
-                                    None, lambda: shorten_with_shrinkme(
-                                        upload_url, service, user_tier))
-                                display_url = shortened
-                                has_ads = shortened != upload_url
-
-                                embed = discord.Embed(
-                                    title="Manga Download Complete",
-                                    description=f"**{title}**",
-                                    color=discord.Color.blue())
-                                embed.add_field(name="Chapters",
-                                                value=str(chapter_count),
-                                                inline=True)
-                                embed.add_field(name="Format",
-                                                value=fmt.upper(),
-                                                inline=True)
-                                embed.add_field(name="Size",
-                                                value=f"{file_size_mb:.1f}MB",
-                                                inline=True)
-                                embed.add_field(name="Save As",
-                                                value=f"`{proper_filename}`",
-                                                inline=False)
-                                embed.add_field(name="Download Link",
-                                                value=display_url,
-                                                inline=False)
-
-                                if has_ads:
-                                    embed.add_field(name="Ad Supported",
-                                                    value=AD_FREE_MESSAGE,
-                                                    inline=False)
-
-                                cover_url = manga_data.get('cover', '')
-                                if cover_url:
-                                    embed.set_thumbnail(url=cover_url)
-
-                                embed.set_footer(
-                                    text=
-                                    f"Hosted on {service} | Rename file after downloading"
-                                )
-                                await message.channel.send(embed=embed)
-
-                                # Ask if download worked - offer retry with different host
-                                retry_prompt = await message.channel.send(
-                                    "**Did the file download successfully?**\n"
-                                    "Press `1` to retry with a different file host\n"
-                                    "Press `2` or wait 30 seconds to finish")
-
-                                tried_hosts_small = upload_status.get(
-                                    "tried", []) + [service]
-
-                                def check_retry_small(m):
-                                    return m.author == message.author and m.channel == message.channel and m.content.strip(
-                                    ) in ['1', '2']
-
-                                try:
-                                    retry_response = await self.wait_for(
-                                        'message',
-                                        check=check_retry_small,
-                                        timeout=30)
-                                    if retry_response.content.strip() == '1':
-                                        await retry_prompt.delete()
-                                        retry_msg = await message.channel.send(
-                                            "Retrying with different host...")
-
-                                        alt_upload_url, alt_service = await self.loop.run_in_executor(
-                                            None, lambda: upload_large_file(
-                                                filename,
-                                                skip_hosts=tried_hosts_small))
-
-                                        if alt_upload_url:
-                                            await retry_msg.delete()
-                                            alt_display_url = alt_upload_url
-                                            shortened = await self.loop.run_in_executor(
-                                                None,
-                                                lambda: shorten_with_shrinkme(
-                                                    alt_upload_url, alt_service, user_tier
-                                                ))
-                                            if shortened != alt_upload_url:
-                                                alt_display_url = shortened
-
-                                            alt_embed = discord.Embed(
-                                                title=
-                                                "Alternative Download Link",
-                                                description=f"**{title}**",
-                                                color=discord.Color.green())
-                                            alt_embed.add_field(
-                                                name="Download Link",
-                                                value=alt_display_url,
-                                                inline=False)
-                                            alt_embed.set_footer(
-                                                text=f"Hosted on {alt_service}"
-                                            )
-                                            await message.channel.send(
-                                                embed=alt_embed)
-                                            logger.info(
-                                                f"Alternative link sent: {alt_display_url} via {alt_service}"
-                                            )
-                                        else:
-                                            await retry_msg.edit(
-                                                content=
-                                                "No more alternative hosts available. Please try again later."
-                                            )
-                                    else:
-                                        await retry_prompt.delete()
-                                except asyncio.TimeoutError:
-                                    try:
-                                        await retry_prompt.delete()
-                                    except:
-                                        pass
-
-                                # Log and cleanup
-                                duration = int(time.time() - start_time)
-                                await log_download({
-                                    'discordUserId':
-                                    str(message.author.id),
-                                    'discordUsername':
-                                    str(message.author.name),
-                                    'novelTitle':
-                                    f"[MANGA] {title}",
-                                    'source':
-                                    manga_data.get('source', 'manga'),
-                                    'chapterStart':
-                                    chapter_start,
-                                    'chapterEnd':
-                                    chapter_end,
-                                    'chapterCount':
-                                    chapter_count,
-                                    'format':
-                                    fmt,
-                                    'userTier':
-                                    user_tier,
-                                    'durationSeconds':
-                                    duration,
-                                    'status':
-                                    'completed'
-                                })
-                                manga_url = state['data'].get('url', '')
-                                novel_key = state['data'].get(
-                                    'novel_key') or self._normalize_novel_key(
-                                        manga_url)
-                                novel_title_stored = state['data'].get(
-                                    'novel_title', title)
-                                total_ch = state['data'].get(
-                                    'total_chapters', chapter_count)
-                                limit_info = state['data'].get(
-                                    'limit_check', {}).get('limit_info', {})
-                                bonus_used = self._calculate_bonus_used(
-                                    chapter_count, limit_info)
-                                await self._update_novel_usage(
-                                    str(message.author.id), novel_key,
-                                    novel_title_stored, total_ch,
-                                    chapter_count, 'manga')
-                                await self._update_daily_usage(
-                                    str(message.author.id),
-                                    manga_chapters=chapter_count,
-                                    manga_bonus_used=bonus_used)
-                                os.remove(filename)
-                                logger.info(
-                                    f"Manga uploaded with ads for free user: {filename}"
-                                )
-
-                                if message.author.id in self.user_states:
-                                    del self.user_states[message.author.id]
-                                return
-                            else:
-                                await progress_msg.edit(
-                                    content="Upload failed, sending directly..."
-                                )
-                                # Fall through to direct send below
-
-                        # Paid users or fallback - send directly
-                        embed = discord.Embed(title="Manga Download Complete",
-                                              description=f"**{title}**",
-                                              color=discord.Color.blue())
-                        embed.add_field(name="Chapters",
-                                        value=str(chapter_count),
-                                        inline=True)
-                        embed.add_field(name="Format",
-                                        value=fmt.upper(),
-                                        inline=True)
-
-                        cover_url = manga_data.get('cover', '')
-                        if cover_url:
-                            embed.set_thumbnail(url=cover_url)
-
-                        embed.set_footer(text="Manga Scraper Bot")
-
-                        await message.channel.send(embed=embed,
-                                                   file=discord.File(filename))
-                        logger.info(f"Manga file sent: {filename}")
-
-                        # Log to database
-                        duration = int(time.time() - start_time)
-                        await log_download({
-                            'discordUserId':
-                            str(message.author.id),
-                            'discordUsername':
-                            str(message.author.name),
-                            'novelTitle':
-                            f"[MANGA] {title}",
-                            'source':
-                            manga_data.get('source', 'manga'),
-                            'chapterStart':
-                            chapter_start,
-                            'chapterEnd':
-                            chapter_end,
-                            'chapterCount':
-                            chapter_count,
-                            'format':
-                            fmt,
-                            'userTier':
-                            user_tier,
-                            'durationSeconds':
-                            duration,
-                            'status':
-                            'completed'
-                        })
-                        # Track per-manga usage (use URL-based key to prevent bypass)
-                        manga_url = state['data'].get('url', '')
-                        novel_key = state['data'].get(
-                            'novel_key') or self._normalize_novel_key(
-                                manga_url)
-                        novel_title_stored = state['data'].get(
-                            'novel_title', title)
-                        total_ch = state['data'].get('total_chapters',
-                                                     chapter_count)
-                        limit_info = state['data'].get('limit_check', {}).get(
-                            'limit_info', {})
-                        bonus_used = self._calculate_bonus_used(
-                            chapter_count, limit_info)
-                        await self._update_novel_usage(str(message.author.id),
-                                                       novel_key,
-                                                       novel_title_stored,
-                                                       total_ch, chapter_count,
-                                                       'manga')
-                        await self._update_daily_usage(
-                            str(message.author.id),
-                            manga_chapters=chapter_count,
-                            manga_bonus_used=bonus_used)
-
-                        # Cleanup
-                        os.remove(filename)
-                    except discord.errors.HTTPException as e:
-                        logger.error(f"Failed to send manga file: {e}")
-                        # Try external upload with progress
-                        file_size_mb = os.path.getsize(filename) / (1024 *
-                                                                    1024)
-                        progress_msg = await message.channel.send(
-                            f"**Uploading to external host...**\n"
-                            f"File size: {file_size_mb:.1f}MB\n"
-                            f"Trying: Litterbox...")
-
-                        upload_status = {"current": "Litterbox", "tried": []}
-
-                        def update_upload_progress(service, status):
-                            if status == "uploading":
-                                upload_status["current"] = service
-                            elif status == "failed":
-                                upload_status["tried"].append(service)
-
-                        import functools
-                        upload_func = functools.partial(
-                            upload_large_file, filename,
-                            update_upload_progress)
-                        upload_task = self.loop.run_in_executor(
-                            None, upload_func)
-
-                        while not upload_task.done():
-                            tried = ", ".join(
-                                upload_status["tried"]
-                            ) if upload_status["tried"] else "None"
-                            await progress_msg.edit(content=(
-                                f"**Uploading to external host...**\n"
-                                f"File size: {file_size_mb:.1f}MB\n"
-                                f"Trying: {upload_status['current']}...\n"
-                                f"Failed: {tried}"))
-                            await asyncio.sleep(3)
-
-                        upload_url, service = await upload_task
-                        if upload_url:
-                            await progress_msg.edit(
-                                content=f"Upload complete to {service}!")
-                            proper_filename = os.path.basename(filename)
-
-                            # Wrap URL with ShrinkMe ads for free users only (skip hosts with own redirects)
-                            display_url = upload_url
-                            has_ads = False
-                            if user_tier == 'normal':
-                                shortened = await self.loop.run_in_executor(
-                                    None, lambda: shorten_with_shrinkme(
-                                        upload_url, service, user_tier))
-                                if shortened != upload_url:
-                                    display_url = shortened
-                                    has_ads = True
-
-                            embed = discord.Embed(
-                                title="Manga Download Complete",
-                                description=f"**{title}**",
-                                color=discord.Color.blue())
-                            embed.add_field(name="Chapters",
-                                            value=str(chapter_count),
-                                            inline=True)
-                            embed.add_field(name="Format",
-                                            value=fmt.upper(),
-                                            inline=True)
-                            embed.add_field(name="Size",
-                                            value=f"{file_size_mb:.1f}MB",
-                                            inline=True)
-                            embed.add_field(name="Save As",
-                                            value=f"`{proper_filename}`",
-                                            inline=False)
-                            embed.add_field(name="Download Link",
-                                            value=display_url,
-                                            inline=False)
-
-                            if has_ads:
-                                embed.add_field(name="Ad Supported",
-                                                value=AD_FREE_MESSAGE,
-                                                inline=False)
-
-                            embed.set_footer(
-                                text=
-                                f"Hosted on {service} | Rename file after downloading"
-                            )
-                            await message.channel.send(embed=embed)
-                            os.remove(filename)
-                        else:
-                            await progress_msg.edit(
-                                content=
-                                f"Failed to upload to all hosts. File saved locally: `{filename}`"
-                            )
-                else:
-                    await message.channel.send(
-                        "Error: Failed to generate file.")
-
-                # Reset state
-                if message.author.id in self.user_states:
-                    del self.user_states[message.author.id]
-
-            except Exception as e:
-                logger.error(f"Manga download error: {e}")
-                await message.channel.send(
-                    f"Error: {str(e)}\n\nPlease try again with `start`")
                 if message.author.id in self.user_states:
                     del self.user_states[message.author.id]
 
