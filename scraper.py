@@ -2348,6 +2348,10 @@ class Scraper:
                     chapter_links = [a.get('href') for a in elements if a.get('href')]
                     full_links = []
                     for link in chapter_links:
+                        # Strip fragment anchors (e.g., #comment-id-XXX)
+                        link = link.split('#')[0]
+                        if not link:
+                            continue
                         if link.startswith('http'):
                             full_links.append(link)
                         elif link.startswith('/'):
@@ -2369,6 +2373,10 @@ class Scraper:
                     matches_slug = slug and slug in href.lower()
                     chapter_like = re.search(r'/\d+-\d+\.html$', href) or href.endswith('.html')
                     if (novel_id in href or matches_slug or chapter_like):
+                        # Strip fragment anchors (e.g., #comment-id-XXX)
+                        href = href.split('#')[0]
+                        if not href:
+                            continue
                         if href.startswith('/'):
                             href = f"https://ranobes.net{href}"
                         elif href.startswith('http'):
@@ -2399,6 +2407,10 @@ class Scraper:
             links: List[str] = []
             for a in anchors:
                 href = a.get('href')
+                if not href:
+                    continue
+                # Strip fragment anchors (e.g., #comment-id-XXX)
+                href = href.split('#')[0]
                 if not href:
                     continue
                 links.append(urljoin(base_url, href))
@@ -2465,7 +2477,10 @@ class Scraper:
             for chap in chapters_data:
                 link = chap.get('link')
                 if link:
-                    links.append(urljoin("https://ranobes.net", link))
+                    # Strip fragment anchors (e.g., #comment-id-XXX)
+                    link = link.split('#')[0]
+                    if link:
+                        links.append(urljoin("https://ranobes.net", link))
             
             if links:
                 logger.debug(f"Extracted {len(links)} links from JSON. Sample: {links[0] if links else 'None'}")
@@ -2862,8 +2877,10 @@ class Scraper:
                 
                 session = base_session
                 if rotate_per_attempt and heavy_security:
+                    logger.info(f"[FETCH] Rotating session/IP for attempt {attempt + 1} on {domain}")
                     session = self._get_fresh_session(rotate_ip=True)
                 elif rotate_on_block and heavy_security and last_blocked:
+                    logger.info(f"[FETCH] Rotating session/IP after block on {domain} (attempt {attempt + 1})")
                     session = self._get_fresh_session(rotate_ip=True)
 
                 resp = session.get(url, headers=headers, timeout=15, allow_redirects=True)
