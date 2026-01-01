@@ -49,7 +49,16 @@ def _load_opus():
 
 
 _opus_loaded = _load_opus()
+from dotenv import load_dotenv
+import os
 
+load_dotenv()  # Loads variables from .env
+
+# Access environment variables
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+DISCORD_SERVER_ID = os.getenv("DISCORD_SERVER_ID")
+SHRINKME_API_KEY = os.getenv("SHRINKME_API_KEY")
+SHRINKEARN_API_KEY = os.getenv("SHRINKEARN_API_KEY")
 import time
 import math
 import requests
