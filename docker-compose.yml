@@ -11,6 +11,7 @@ services:
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
       - SHRINKME_API_KEY=${SHRINKME_API_KEY:-}
       - SHRINKEARN_API_KEY=${SHRINKEARN_API_KEY:-}
+      - PROXY_URL=${PROXY_URL:-}
     volumes:
       # Persist cookies between restarts
       - ./cookies.json:/app/cookies.json
