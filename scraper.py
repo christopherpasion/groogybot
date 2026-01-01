@@ -227,6 +227,9 @@ class Scraper:
         seen_urls = set()
         seen_titles = set()  # Also dedupe by normalized title
         
+        # Normalize query for relevance matching
+        query_words = set(re.sub(r'[^a-z0-9\s]', '', query.lower()).split())
+        
         for r in results:
             url = r.get('url', '')
             title = r.get('title', '')
@@ -246,6 +249,16 @@ class Scraper:
             clean_title = clean_title.strip()
             r['title'] = clean_title if clean_title else title
             
+            # Relevance check: title must contain at least one query word
+            title_words = set(re.sub(r'[^a-z0-9\s]', '', clean_title.lower()).split())
+            matching_words = query_words & title_words
+            if not matching_words:
+                # No word match - skip this result as irrelevant
+                continue
+            
+            # Calculate relevance score (for sorting later)
+            r['_relevance'] = len(matching_words) / len(query_words) if query_words else 0
+            
             # Normalize for deduplication (lowercase, no special chars)
             normalized_title = re.sub(r'[^a-z0-9]', '', clean_title.lower())
             
@@ -262,6 +275,13 @@ class Scraper:
             seen_urls.add(url)
             seen_titles.add(title_key)
             unique_results.append(r)
+        
+        # Sort by relevance (best matches first)
+        unique_results.sort(key=lambda x: x.get('_relevance', 0), reverse=True)
+        
+        # Remove internal relevance field
+        for r in unique_results:
+            r.pop('_relevance', None)
 
         # Cache results for future use (reduces requests and IP blocking)
         if use_cache and CACHE_AVAILABLE and unique_results:
