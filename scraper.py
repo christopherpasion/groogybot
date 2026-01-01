@@ -2559,7 +2559,8 @@ class Scraper:
             
             # Check for anti-bot/rate limit page (common on ranobes)
             page_text = soup.get_text()[:500].lower()
-            if 'abnormal activity' in page_text or 'detected abnormal' in page_text or 'dear visitor' in page_text:
+            page_title = soup.title.string.lower() if soup.title and soup.title.string else ''
+            if 'abnormal activity' in page_text or 'detected abnormal' in page_text or 'dear visitor' in page_text or 'just a moment' in page_title or 'just a moment' in page_text:
                 logger.warning(f"[Chapter] Rate limited at chapter {chapter_num}, waiting 10s...")
                 logger.debug(f"[Chapter] Anti-bot text sample: {page_text[:200]}")
                 # Dump HTML for debugging
@@ -2893,7 +2894,7 @@ class Scraper:
                 if resp.status_code == 200:
                     # Check for Cloudflare challenge or bot page
                     content_sample = resp.text[:800].lower() if resp.text else ''
-                    if 'checking your browser' in content_sample or ('cloudflare' in content_sample and 'challenge' in content_sample):
+                    if 'just a moment' in content_sample or 'checking your browser' in content_sample or ('cloudflare' in content_sample and 'challenge' in content_sample):
                         logger.warning(f"[CLOUDFLARE] Detected Cloudflare challenge on {url}")
                         blocked = True
                     elif 'dear visitor' in content_sample or 'abnormal activity' in content_sample:
