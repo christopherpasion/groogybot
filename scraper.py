@@ -1113,7 +1113,9 @@ class Scraper:
         self.session = requests.Session()
         
         # Configure proxy from environment variable (format: http://user:pass@host:port)
+        # For Webshare rotating proxy, use: http://user-rotate:pass@p.webshare.io:80
         self.proxy_url = os.getenv('PROXY_URL', '')
+        self.rotating_proxy_url = os.getenv('ROTATING_PROXY_URL', '')  # Optional separate rotating proxy
         if self.proxy_url:
             self.session.proxies = {
                 'http': self.proxy_url,
@@ -1157,10 +1159,29 @@ class Scraper:
         
         logger.info(f"[SCRAPER] Initialized with {parallel_workers} workers, playwright={use_playwright}")
 
+    def _get_fresh_session(self, rotate_ip: bool = False) -> requests.Session:
+        """Create a fresh session with new headers and optionally rotated IP.
+        
+        Use this for sites with heavy anti-bot protection to avoid fingerprinting.
+        If rotate_ip=True and ROTATING_PROXY_URL is set, uses the rotating proxy.
+        """
+        session = requests.Session()
+        session.headers.update(self._get_random_headers())
+        
+        # Use rotating proxy if available and requested
+        proxy_url = self.rotating_proxy_url if (rotate_ip and self.rotating_proxy_url) else self.proxy_url
+        if proxy_url:
+            session.proxies = {'http': proxy_url, 'https': proxy_url}
+        
+        # Set common cookies
+        session.cookies.set('browser_check', '1', domain='ranobes.net')
+        
+        return session
+
     def _search_fetch(self, url: str, site_name: str, timeout: int = 10) -> Optional[requests.Response]:
         """Fetch a URL for search purposes with proper headers and logging.
         
-        Uses the session for cookie persistence and includes Cloudflare bypass headers.
+        Uses fresh session for heavy-security sites to avoid fingerprinting.
         Returns None if the request fails or returns a Cloudflare challenge.
         """
         try:
@@ -1168,8 +1189,16 @@ class Scraper:
             parsed = urlparse(url)
             domain = parsed.netloc
             
+            # Use fresh session with rotating IP for heavy-security sites
+            heavy_security = any(site in domain.lower() for site in ['ranobes', 'novelbin', 'lightnovelworld'])
+            if heavy_security:
+                session = self._get_fresh_session(rotate_ip=True)
+                logger.debug(f"[{site_name}] Using fresh session for heavy-security site")
+            else:
+                session = self.session
+            
             headers = self._get_cloudflare_bypass_headers(url)
-            resp = self.session.get(url, headers=headers, timeout=timeout)
+            resp = session.get(url, headers=headers, timeout=timeout)
             
             if resp.status_code == 403:
                 logger.debug(f"[{site_name}] 403 Forbidden - likely Cloudflare blocked")
