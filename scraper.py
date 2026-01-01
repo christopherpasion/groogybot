@@ -2235,6 +2235,13 @@ class Scraper:
                     if latest:
                         logger.info(f"Ranobes novel page latest-chapters block yielded {len(latest)} links")
                         all_links.extend(latest)
+                    # Also try HTML fallback selectors against the novel page
+                    if not all_links:
+                        logger.info("Ranobes: Trying novel page HTML fallback selectors")
+                        novel_html_links = self._extract_ranobes_links_html_fallback(novel_soup, novel_id, slug)
+                        if novel_html_links:
+                            logger.info(f"Ranobes novel page HTML fallback yielded {len(novel_html_links)} links")
+                            all_links.extend(novel_html_links)
 
             # If we couldn't read the page size, assume standard 10 or just use what we found
             if page_size == 0: page_size = max(len(all_links), 10)
