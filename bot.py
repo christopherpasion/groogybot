@@ -1,54 +1,16 @@
 import discord
 from discord import app_commands
-import discord.opus
 import os
 import asyncio
 import re
 import logging
-import ctypes.util
 from urllib.parse import urlparse
 
 # Configure logging early for opus loading
 logging.basicConfig(level=logging.INFO)
-_early_logger = logging.getLogger('opus_loader')
 
 
 # Load opus library for voice support with comprehensive search
-def _load_opus():
-    """Try to load opus library from multiple possible locations"""
-    if discord.opus.is_loaded():
-        _early_logger.info("✅ Opus already loaded")
-        return True
-
-    # List of possible opus library names
-    opus_names = [
-        'libopus.so.0',
-        'libopus.so',
-        'opus',
-        'libopus-0',
-        '/nix/store/*/lib/libopus.so.0',
-    ]
-
-    # Try ctypes.util first
-    opus_path = ctypes.util.find_library('opus')
-    if opus_path:
-        opus_names.insert(0, opus_path)
-
-    for name in opus_names:
-        try:
-            discord.opus.load_opus(name)
-            _early_logger.info(f"✅ Opus loaded successfully: {name}")
-            return True
-        except OSError as e:
-            _early_logger.debug(f"Failed to load opus from {name}: {e}")
-            continue
-
-    _early_logger.error(
-        "❌ OPUS NOT FOUND! Voice will NOT work. Install libopus.")
-    return False
-
-
-_opus_loaded = _load_opus()
 from dotenv import load_dotenv
 import os
 
@@ -57,18 +19,14 @@ load_dotenv()  # Loads variables from .env
 # Access environment variables
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DISCORD_SERVER_ID = os.getenv("DISCORD_SERVER_ID")
-SHRINKME_API_KEY = os.getenv("SHRINKME_API_KEY")
-SHRINKEARN_API_KEY = os.getenv("SHRINKEARN_API_KEY")
 import time
 import math
 import requests
 from scraper import Scraper, is_protected_site
 from utils import create_epub, create_pdf
-from manga_scraper import MangaScraper
-from manga_utils import create_manga_pdf, create_manga_zip, cleanup_manga_temp, upload_large_file, is_file_too_large_for_discord
+from manga_utils import upload_large_file, is_file_too_large_for_discord
 from user_settings import settings_manager, get_user_settings, get_setting, set_setting, get_style_css, get_settings_display, EPUB_STYLES
 from download_history import history_manager, add_download, get_history, get_last_download, get_library, check_duplicate, get_stats
-from tts_handler import tts_handler, detect_language
 from typing import Optional, Dict, Tuple
 
 # Configure logging
@@ -143,8 +101,6 @@ async def log_to_sheets(data: dict, loop=None):
 # Helper to get token securely
 TOKEN = os.getenv('DISCORD_TOKEN')
 SERVER_ID = int(os.getenv('DISCORD_SERVER_ID', '0'))
-SHRINKME_API_KEY = os.getenv('SHRINKME_API_KEY', '')
-SHRINKEARN_API_KEY = os.getenv('SHRINKEARN_API_KEY', '')
 
 # Ad-free upgrade message for free users
 AD_FREE_MESSAGE = (
@@ -153,70 +109,9 @@ AD_FREE_MESSAGE = (
     "https://www.patreon.com/c/meowisteaandcoffee/membership")
 
 
-def _try_shrinkme(long_url: str) -> str:
-    """Try ShrinkMe API. Returns shortened URL or None on failure."""
-    if not SHRINKME_API_KEY:
-        return None
-    try:
-        endpoint = "https://shrinkme.io/api"
-        params = {"api": SHRINKME_API_KEY, "url": long_url}
-        response = requests.get(endpoint, params=params, timeout=10)
-        data = response.json()
-        if "shortenedUrl" in data and data["shortenedUrl"]:
-            logger.info(
-                f"ShrinkMe shortened: {long_url[:50]}... -> {data['shortenedUrl']}"
-            )
-            return data["shortenedUrl"]
-    except Exception as e:
-        logger.error(f"ShrinkMe API failed: {e}")
-    return None
-
-
-def _try_shrinkearn(long_url: str) -> str:
-    """Try ShrinkEarn API as fallback. Returns shortened URL or None on failure."""
-    if not SHRINKEARN_API_KEY:
-        return None
-    try:
-        endpoint = "https://shrinkearn.com/api"
-        params = {"api": SHRINKEARN_API_KEY, "url": long_url}
-        response = requests.get(endpoint, params=params, timeout=10)
-        data = response.json()
-        if "shortenedUrl" in data and data["shortenedUrl"]:
-            logger.info(
-                f"ShrinkEarn shortened: {long_url[:50]}... -> {data['shortenedUrl']}"
-            )
-            return data["shortenedUrl"]
-    except Exception as e:
-        logger.error(f"ShrinkEarn API failed: {e}")
-    return None
-
-
 def shorten_with_shrinkme(long_url: str, service: str = "") -> str:
-    """Shorten a URL using ad monetization APIs (ShrinkMe primary, ShrinkEarn fallback).
-    Returns shortened URL on success, original URL if both fail.
-    Skips hosts that already have their own redirect/UI to avoid multiple redirects."""
-
-    # Skip for hosts that already have their own page/redirect
-    skip_hosts = ['gofile', 'file.io', 'fileio']
-    if service and any(host in service.lower() for host in skip_hosts):
-        logger.info(f"Skipping ad link for {service} (already has redirect)")
-        return long_url
-
-    # Try ShrinkMe first
-    result = _try_shrinkme(long_url)
-    if result:
-        return result
-
-    # Fallback to ShrinkEarn
-    result = _try_shrinkearn(long_url)
-    if result:
-        return result
-
-    # Both failed, return original (no ads)
-    logger.warning(
-        "Both ShrinkMe and ShrinkEarn failed, returning direct link")
+    """URL shortening disabled - returns direct URL."""
     return long_url
-
 
 # Role names (case-insensitive matching)
 VERIFIED_ROLE_NAME = "Verified"
@@ -251,16 +146,8 @@ STAT_CHANNELS = [
         "template": "📘 ɴᴏᴠᴇʟꜱ ᴛᴏᴅᴀʏ • {count}"
     },
     {
-        "key": "manga_today",
-        "template": "📕 ᴍᴀɴɢᴀ ᴛᴏᴅᴀʏ • {count}"
-    },
-    {
         "key": "novels_alltime",
         "template": "📚 ɴᴏᴠᴇʟꜱ ᴀʟʟ-ᴛɪᴍᴇ • {count}"
-    },
-    {
-        "key": "manga_alltime",
-        "template": "📖 ᴍᴀɴɢᴀ ᴀʟʟ-ᴛɪᴍᴇ • {count}"
     },
     {
         "key": "active_jobs",
@@ -344,7 +231,6 @@ class NovelBot(discord.Client):
         self.user_states = {
         }  # {user_id: {'step': ..., 'data': ..., 'message': ..., 'cancelled': ..., 'user_tier': ...}}
         self.scraper = Scraper()
-        self.manga_scraper = MangaScraper()  # Manga scraper instance
         self.scraping_tasks = {}  # {user_id: task}
         self.temporary_channels = {
         }  # {channel_id: user_id} - tracks temporary private channels
@@ -483,7 +369,7 @@ class NovelBot(discord.Client):
 
         @self.tree.command(
             name="sites",
-            description="Post the list of supported novel and manga sites",
+            description="Post the list of supported novel sites",
             guild=discord.Object(id=SERVER_ID))
         async def post_sites(interaction: discord.Interaction):
             # Only allow in specific channel
@@ -1747,7 +1633,7 @@ Use `\\n` for new lines when using /edit command."""
         
         embed = discord.Embed(
             title="📚 Meowi's Tea and Coffee Bot",
-            description="Download novels and manga in EPUB, PDF, or ZIP format.",
+            description="Download novels in EPUB or PDF format.",
             color=0x5865F2
         )
         
@@ -2231,8 +2117,6 @@ Use `\\n` for new lines when using /edit command."""
         url = user_input.strip()
         if re.match(r'^https?://', url):
             # Check if it's a manga URL
-            if MangaScraper.is_manga_url(url):
-                return 'manga_url'
             return 'url'  # Novel URL
         return 'title'
 
@@ -2855,24 +2739,7 @@ Use `\\n` for new lines when using /edit command."""
             input_type = self._detect_input_type(user_input)
             state['step'] = 'waiting_for_input' # Transition to waiting_for_input immediately
 
-            if input_type == 'manga_url':
-                # Manga URL detected - go straight to manga flow
-                logger.info(f"Manga URL received: {user_input}")
-                state['data']['url'] = user_input
-                state['data']['content_type'] = 'manga'
-                state['step'] = 'waiting_for_manga_format'
-                await message.channel.send(
-                    "📚 **Manga Link Detected!**\n\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "**Select Your Preferred Format**\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "**1️⃣  PDF** - All images in one file\n"
-                    "  Best for: Reading, sharing\n\n"
-                    "**2️⃣  ZIP** - Images organized by chapter\n"
-                    "  Best for: Archiving, offline viewing\n\n"
-                    "Reply with `1` or `2`" + HINT_TEXT)
-
-            elif input_type == 'url':
+            if input_type == 'url':
                 logger.info(f"Novel URL received: {user_input}")
 
                 # Check if WuxiaWorld/WebNovel URL - sponsor only
@@ -2920,18 +2787,42 @@ Use `\\n` for new lines when using /edit command."""
                     "Reply with `1` or `2`" + HINT_TEXT)
 
             else:  # input_type == 'title'
-                # Ask if they want manga or novel
+                # Direct novel search (manga disabled)
                 logger.info(f"Title search: {user_input}")
                 state['data']['search_query'] = user_input
-                state['step'] = 'waiting_for_content_type'
-                await message.channel.send(
-                    f"🔍 **Searching for:** {user_input}\n\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "**What are you looking for?**\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "**1️⃣  Novel** - Web novels, light novels\n\n"
-                    "**2️⃣  Manga** - Comics, manhwa, manhua\n\n"
-                    "Reply with `1` or `2`" + HINT_TEXT)
+                await message.channel.send(f"🔍 Searching for '{user_input}'...")
+                
+                results = await self._search_with_choices(user_input, message)
+                if results:
+                    if len(results) == 1:
+                        novel = results[0]
+                        state['data']['selected_novel'] = novel
+                        state['step'] = 'waiting_for_source_choice'
+                        
+                        sources = novel.get('sources', [])
+                        if not sources:
+                            await message.channel.send(
+                                f"No sources found for '{novel.get('title', 'Unknown')}'.")
+                            del self.user_states[message.author.id]
+                            return
+                        sources_text = f"**{novel.get('title', 'Unknown')}**\n\nSources:\n"
+                        for i, src in enumerate(sources, 1):
+                            sources_text += f"**{i}.** {src.get('source', 'Unknown')}\n"
+                        sources_text += f"\nReply 1-{len(sources)}" + HINT_TEXT
+                        await message.channel.send(sources_text)
+                    else:
+                        state['data']['search_results'] = results
+                        state['step'] = 'waiting_for_novel_choice'
+                        
+                        choices_text = "**Found novels:**\n\n"
+                        for i, result in enumerate(results, 1):
+                            sources_list = ", ".join([src['source'] for src in result.get('sources', [])])
+                            choices_text += f"**{i}.** {result['title']} ({sources_list})\n"
+                        choices_text += f"\nReply 1-{len(results)}" + HINT_TEXT
+                        await message.channel.send(choices_text)
+                else:
+                    await message.channel.send("Not found. Try a different title or URL.")
+                    del self.user_states[message.author.id]
             return
 
         if step == 'waiting_for_novel_choice':
@@ -2939,19 +2830,10 @@ Use `\\n` for new lines when using /edit command."""
             user_choice = message.content.strip().lower()
             search_results = state['data'].get('search_results', [])
 
-            # Check for back command - go back to novel/manga selection
+            # Check for back command - go back to title input
             if user_choice == 'back':
-                state['step'] = 'waiting_for_content_type'
-                search_query = state['data'].get('search_query', 'your search')
-                await message.channel.send(
-                    f"↩️ Going back.\n\n"
-                    f"🔍 **Searching for:** {search_query}\n\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "**What are you looking for?**\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "**1️⃣  Novel** - Web novels, light novels\n\n"
-                    "**2️⃣  Manga** - Comics, manhwa, manhua\n\n"
-                    "Reply with `1` or `2`" + HINT_TEXT)
+                state['step'] = 'awaiting_welcome_ack'
+                await message.channel.send("↩️ Going back. Please enter a title or URL:")
                 return
 
             try:
