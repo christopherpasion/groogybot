@@ -1525,7 +1525,8 @@ class Scraper:
                 try:
                     from playwright_scraper import get_scraper_instance, run_in_pw_loop
                     pw_scraper = get_scraper_instance()
-                    result = run_in_pw_loop(pw_scraper.get_page_content(base_chapters_url))
+                    # wait_for_js=True to ensure JavaScript data loads
+                    result = run_in_pw_loop(pw_scraper.get_page_content(base_chapters_url, wait_for_js=True))
                     # get_page_content returns (content, title) tuple
                     html_content = result[0] if result else None
                     if not html_content:
@@ -1622,7 +1623,8 @@ class Scraper:
                     try:
                         from playwright_scraper import get_scraper_instance, run_in_pw_loop
                         pw_scraper = get_scraper_instance()
-                        result = run_in_pw_loop(pw_scraper.get_page_content(url))
+                        # wait_for_js=True to ensure JavaScript data loads
+                        result = run_in_pw_loop(pw_scraper.get_page_content(url, wait_for_js=True))
                         # get_page_content returns (content, title) tuple
                         novel_html = result[0] if result else None
                         if novel_html:
@@ -1722,7 +1724,8 @@ class Scraper:
                 try:
                     from playwright_scraper import get_scraper_instance, run_in_pw_loop
                     pw_scraper = get_scraper_instance()
-                    result = run_in_pw_loop(pw_scraper.get_page_content(url))
+                    # wait_for_js=True to ensure JavaScript data loads
+                    result = run_in_pw_loop(pw_scraper.get_page_content(url, wait_for_js=True))
                     # get_page_content returns (content, title) tuple
                     html_content = result[0] if result else None
                     if not html_content:

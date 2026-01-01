@@ -383,7 +383,7 @@ class PlaywrightScraper:
         finally:
             await page.close()
     
-    async def get_page_content(self, url: str, wait_selector: Optional[str] = None, timeout: int = 30000) -> Tuple[str, str]:
+    async def get_page_content(self, url: str, wait_selector: Optional[str] = None, timeout: int = 30000, wait_for_js: bool = False) -> Tuple[str, str]:
         context = await self._ensure_browser()
         page = await context.new_page()
         try:
@@ -393,13 +393,23 @@ class PlaywrightScraper:
             cookies = await context.cookies()
             logger.info(f"[Playwright] User-Agent: {ua}")
             logger.info(f"[Playwright] Cookies: {cookies}")
-            await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+            
+            # Use networkidle for pages that need JS to fully load
+            wait_until = 'networkidle' if wait_for_js else 'domcontentloaded'
+            await page.goto(url, wait_until=wait_until, timeout=timeout)
+            
             if wait_selector:
                 try:
                     await page.wait_for_selector(wait_selector, timeout=10000)
                 except:
                     pass
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            
+            # Extra wait for JS-heavy pages
+            if wait_for_js:
+                await asyncio.sleep(random.uniform(2.0, 3.0))
+            else:
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+            
             content = await page.content()
             title = await page.title()
             return content, title
