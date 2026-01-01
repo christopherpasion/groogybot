@@ -30,4 +30,4 @@ docker-compose.override.yml
 .ipynb_checkpoints/
 
 # Secrets
-.env.example
+# .env files are ignored, but .env.example is tracked as a template
