@@ -1442,8 +1442,35 @@ class Scraper:
 
             script_tag = dle_content.find("script")
             if not script_tag or not script_tag.string:
-                logger.warning(f"No script tag with data found")
-                return None
+                # Debug: check all scripts on the page
+                all_scripts = soup.find_all("script")
+                script_info = []
+                data_script = None
+                
+                for i, script in enumerate(all_scripts):
+                    if script.string:
+                        content_preview = script.string.strip()[:100].replace('\n', ' ')
+                        script_info.append(f"Script {i}: {content_preview}...")
+                        
+                        # Look for __DATA__ in any script
+                        if 'window.__DATA__' in script.string:
+                            data_script = script
+                            logger.info(f"Found __DATA__ script outside content div (Script {i})")
+                            break
+                    else:
+                        script_info.append(f"Script {i}: <empty>")
+                
+                logger.warning(f"No script in content div. Found {len(all_scripts)} total scripts:")
+                for info in script_info[:5]:  # Show first 5 scripts
+                    logger.warning(f"  {info}")
+                
+                if data_script:
+                    script_tag = data_script
+                else:
+                    logger.error(f"No __DATA__ script found anywhere on page")
+                    return None
+            else:
+                logger.debug(f"Found script in content div")
 
             # Extract JSON from window.__DATA__
             import json
@@ -2267,6 +2294,14 @@ class Scraper:
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
         
+        # Use fresh session with IP rotation for heavy-security sites
+        heavy_security = any(site in domain for site in ['ranobes', 'novelbin', 'lightnovelworld'])
+        if heavy_security:
+            session = self._get_fresh_session(rotate_ip=True)
+            logger.debug(f"[FETCH] Using fresh session + IP rotation for {domain}")
+        else:
+            session = self.session
+        
         # Identify which site we're hitting
         site_key = None
         for key in SITE_MIRRORS.keys():
@@ -2291,7 +2326,7 @@ class Scraper:
                 if referer:
                     headers['Referer'] = referer
                 
-                resp = self.session.get(url, headers=headers, timeout=15, allow_redirects=True)
+                resp = session.get(url, headers=headers, timeout=15, allow_redirects=True)
                 
                 # Log response details for debugging
                 logger.debug(f"[FETCH] Response: status={resp.status_code}, url={resp.url}, cookies={len(resp.cookies)}")
