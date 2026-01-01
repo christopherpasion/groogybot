@@ -2259,8 +2259,22 @@ class Scraper:
 
             logger.info(f"Total chapters collected: {len(all_links)}")
 
-            # 7. Deduplicate and Return
-            return list(dict.fromkeys(all_links))
+            # 7. Deduplicate and filter
+            deduped = list(dict.fromkeys(all_links))
+            # Filter out the novel page itself and keep likely chapter pages
+            filtered = []
+            for link in deduped:
+                if not link:
+                    continue
+                if link.rstrip('/') == url.rstrip('/'):
+                    continue
+                if novel_id in link and link.endswith('.html'):
+                    filtered.append(link)
+                    continue
+                # Allow other ranobes chapter-style html pages
+                if link.endswith('.html'):
+                    filtered.append(link)
+            return filtered
 
         except Exception as e:
             logger.error(f"Error getting Ranobes links: {e}")
@@ -2289,18 +2303,19 @@ class Scraper:
                 elements = soup.select(selector)
                 if elements:
                     chapter_links = [a.get('href') for a in elements if a.get('href')]
-                    # Filter for full URLs
                     full_links = []
                     for link in chapter_links:
                         if link.startswith('http'):
                             full_links.append(link)
                         elif link.startswith('/'):
                             full_links.append(f"https://ranobes.net{link}")
-                    
+
                     if full_links:
                         logger.info(f"HTML fallback found {len(full_links)} links using: {selector}")
                         links.extend(full_links)
-                        break
+                        # Keep collecting if we found very few (broken layout); otherwise stop
+                        if len(links) >= 5:
+                            break
             
             if not links:
                 # Last resort: search all links for patterns
@@ -2309,9 +2324,8 @@ class Scraper:
                     href = a.get('href', '')
                     # Look for links that contain novel ID or novel name patterns
                     matches_slug = slug and slug in href.lower()
-                    if (novel_id in href or 
-                        matches_slug or
-                        re.search(r'/\d+-\d+\.html$', href)):  # Chapter pattern
+                    chapter_like = re.search(r'/\d+-\d+\.html$', href) or href.endswith('.html')
+                    if (novel_id in href or matches_slug or chapter_like):
                         if href.startswith('/'):
                             href = f"https://ranobes.net{href}"
                         elif href.startswith('http'):
