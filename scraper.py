@@ -2277,6 +2277,9 @@ class Scraper:
                 # Keep links containing the novel id (even without .html) as a last resort
                 if novel_id in norm:
                     filtered.append(link)
+            if not filtered:
+                logger.error("Ranobes: No chapter links found after filtering; failing scrape")
+                return []
             return filtered
 
         except Exception as e:
@@ -2303,7 +2306,9 @@ class Scraper:
                 '.chapter-link a',  # Class-based
                 'a[data-chapter]',  # Data attribute
                 'a[data-chapter-id]',
-                'a[data-number]'
+                'a[data-number]',
+                'a[data-id]',
+                'a[data-url]'
             ])
             
             for selector in selectors:
