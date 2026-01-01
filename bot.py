@@ -149,10 +149,17 @@ def _try_shrinkearn(long_url: str) -> str:
     return None
 
 
-def shorten_with_shrinkme(long_url: str, service: str = "") -> str:
+def shorten_with_shrinkme(long_url: str, service: str = "", user_tier: str = "normal") -> str:
     """Shorten a URL using ad monetization APIs (ShrinkMe primary, ShrinkEarn fallback).
     Returns shortened URL on success, original URL if both fail.
-    Skips hosts that already have their own redirect/UI to avoid multiple redirects."""
+    Skips hosts that already have their own redirect/UI to avoid multiple redirects.
+
+    Ads are only applied for the normal tier; higher tiers always receive direct links.
+    """
+
+    # Premium/verified tiers skip ads entirely
+    if user_tier != 'normal':
+        return long_url
 
     # Skip for hosts that already have their own page/redirect
     skip_hosts = ['gofile', 'file.io', 'fileio']
@@ -3361,7 +3368,7 @@ Use `\\n` for new lines when using /edit command."""
                             if user_tier == 'normal':
                                 shortened = await self.loop.run_in_executor(
                                     None, lambda: shorten_with_shrinkme(
-                                        upload_url, service))
+                                        upload_url, service, user_tier))
                                 if shortened != upload_url:
                                     display_url = shortened
                                     has_ads = True
@@ -3492,7 +3499,7 @@ Use `\\n` for new lines when using /edit command."""
                                 # Wrap with ShrinkMe ads
                                 shortened = await self.loop.run_in_executor(
                                     None, lambda: shorten_with_shrinkme(
-                                        upload_url, service))
+                                        upload_url, service, user_tier))
                                 display_url = shortened
                                 has_ads = shortened != upload_url
 
@@ -3759,7 +3766,7 @@ Use `\\n` for new lines when using /edit command."""
                             if user_tier == 'normal':
                                 shortened = await self.loop.run_in_executor(
                                     None, lambda: shorten_with_shrinkme(
-                                        upload_url, service))
+                                        upload_url, service, user_tier))
                                 if shortened != upload_url:
                                     display_url = shortened
                                     has_ads = True
@@ -3937,7 +3944,7 @@ Use `\\n` for new lines when using /edit command."""
                             if user_tier == 'normal':
                                 shortened = await self.loop.run_in_executor(
                                     None, lambda: shorten_with_shrinkme(
-                                        upload_url, service))
+                                        upload_url, service, user_tier))
                                 if shortened != upload_url:
                                     display_url = shortened
 
@@ -4635,7 +4642,7 @@ Use `\\n` for new lines when using /edit command."""
                             if user_tier == 'normal':
                                 shortened = await self.loop.run_in_executor(
                                     None, lambda: shorten_with_shrinkme(
-                                        upload_url, service))
+                                        upload_url, service, user_tier))
                                 if shortened != upload_url:
                                     display_url = shortened
                                     has_ads = True
@@ -4713,7 +4720,7 @@ Use `\\n` for new lines when using /edit command."""
                                             shortened = await self.loop.run_in_executor(
                                                 None,
                                                 lambda: shorten_with_shrinkme(
-                                                    alt_upload_url, alt_service
+                                                    alt_upload_url, alt_service, user_tier
                                                 ))
                                             if shortened != alt_upload_url:
                                                 alt_display_url = shortened
@@ -4838,7 +4845,7 @@ Use `\\n` for new lines when using /edit command."""
                                 # Wrap with ShrinkMe ads
                                 shortened = await self.loop.run_in_executor(
                                     None, lambda: shorten_with_shrinkme(
-                                        upload_url, service))
+                                        upload_url, service, user_tier))
                                 display_url = shortened
                                 has_ads = shortened != upload_url
 
@@ -4911,7 +4918,7 @@ Use `\\n` for new lines when using /edit command."""
                                             shortened = await self.loop.run_in_executor(
                                                 None,
                                                 lambda: shorten_with_shrinkme(
-                                                    alt_upload_url, alt_service
+                                                    alt_upload_url, alt_service, user_tier
                                                 ))
                                             if shortened != alt_upload_url:
                                                 alt_display_url = shortened
@@ -5126,7 +5133,7 @@ Use `\\n` for new lines when using /edit command."""
                             if user_tier == 'normal':
                                 shortened = await self.loop.run_in_executor(
                                     None, lambda: shorten_with_shrinkme(
-                                        upload_url, service))
+                                        upload_url, service, user_tier))
                                 if shortened != upload_url:
                                     display_url = shortened
                                     has_ads = True

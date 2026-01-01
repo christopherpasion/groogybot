@@ -217,6 +217,15 @@ class NovelCache:
         shutil.rmtree(self.cache_dir, ignore_errors=True)
         self.__init__(str(self.cache_dir))
         logger.info("[Cache] Cleared all cache")
+
+    def clear_novel_chapters(self, novel_url: str):
+        """Clear all cached chapters for a specific novel."""
+        novel_hash = self._url_hash(novel_url)
+        novel_chapters_dir = self.chapters_dir / novel_hash
+        if novel_chapters_dir.exists():
+            import shutil
+            shutil.rmtree(novel_chapters_dir, ignore_errors=True)
+            logger.info(f"[Cache] Cleared chapters cache for {novel_url[:80]}")
     
     def get_stats(self) -> Dict:
         """Get cache statistics."""

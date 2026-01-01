@@ -415,7 +415,7 @@ class Scraper:
             blocked = False
             for base_url, search_path, url_pattern in search_configs:
                 search_url = base_url + search_path
-                resp = self._search_fetch(search_url, 'Ranobes')
+                resp = self._search_fetch(search_url, 'Ranobes', rotate_on_fail=True)
                 if not resp:
                     continue
                 
@@ -1135,6 +1135,13 @@ class Scraper:
         
         # Configure session for better anti-detection
         self.session.headers.update(self._get_random_headers())
+
+        # Lightweight bandwidth accounting (in-memory, resets on restart)
+        self.bandwidth_month = None
+        self.bandwidth_bytes = 0
+        self.bandwidth_budget_bytes = 10 * 1024 * 1024 * 1024  # 10GB proxy budget
+        self.bandwidth_warn70 = False
+        self.bandwidth_warn90 = False
         
         # Pre-set cookies for sites that require them (e.g., Ranobes browser check)
         self.session.cookies.set('browser_check', '1', domain='ranobes.net')
@@ -1192,6 +1199,46 @@ class Scraper:
         except Exception as e:
             logger.debug(f"[DEBUG] Failed to dump HTML: {e}")
 
+    def _track_bandwidth(self, resp: Optional[requests.Response]) -> None:
+        """Track response size and warn as we approach the proxy budget."""
+        try:
+            if not resp:
+                return
+
+            from datetime import datetime
+
+            current_month = datetime.utcnow().strftime("%Y-%m")
+            if self.bandwidth_month != current_month:
+                self.bandwidth_month = current_month
+                self.bandwidth_bytes = 0
+                self.bandwidth_warn70 = False
+                self.bandwidth_warn90 = False
+
+            content_length = resp.headers.get('Content-Length') if resp.headers else None
+            if content_length and str(content_length).isdigit():
+                size_bytes = int(content_length)
+            else:
+                size_bytes = len(resp.content or b"")
+
+            self.bandwidth_bytes += size_bytes
+
+            if self.bandwidth_budget_bytes <= 0:
+                return
+
+            usage_pct = self.bandwidth_bytes / self.bandwidth_budget_bytes
+            if not self.bandwidth_warn70 and usage_pct >= 0.7:
+                self.bandwidth_warn70 = True
+                used_mb = self.bandwidth_bytes / 1_048_576
+                budget_mb = self.bandwidth_budget_bytes / 1_048_576
+                logger.warning(f"[BANDWIDTH] ~70% used ({used_mb:.1f} MB of {budget_mb:.0f} MB). Consider pausing heavy scraping.")
+            if not self.bandwidth_warn90 and usage_pct >= 0.9:
+                self.bandwidth_warn90 = True
+                used_mb = self.bandwidth_bytes / 1_048_576
+                budget_mb = self.bandwidth_budget_bytes / 1_048_576
+                logger.error(f"[BANDWIDTH] ~90% used ({used_mb:.1f} MB of {budget_mb:.0f} MB). Reduce requests or rotate proxies.")
+        except Exception as e:
+            logger.debug(f"[BANDWIDTH] Tracking error: {e}")
+
     def _get_fresh_session(self, rotate_ip: bool = False) -> requests.Session:
         """Create a fresh session with new headers and optionally rotated IP.
         
@@ -1211,7 +1258,7 @@ class Scraper:
         
         return session
 
-    def _search_fetch(self, url: str, site_name: str, timeout: int = 10) -> Optional[requests.Response]:
+    def _search_fetch(self, url: str, site_name: str, timeout: int = 10, rotate_on_fail: bool = False) -> Optional[requests.Response]:
         """Fetch a URL for search purposes with proper headers and logging.
         
         Uses fresh session for heavy-security sites to avoid fingerprinting.
@@ -1222,6 +1269,29 @@ class Scraper:
             parsed = urlparse(url)
             domain = parsed.netloc
             
+            def fetch_once(sess: requests.Session) -> Optional[requests.Response]:
+                headers = self._get_cloudflare_bypass_headers(url)
+                resp_inner = sess.get(url, headers=headers, timeout=timeout)
+                self._track_bandwidth(resp_inner)
+                
+                if resp_inner.status_code == 403:
+                    logger.debug(f"[{site_name}] 403 Forbidden - likely Cloudflare blocked")
+                    return None
+                elif resp_inner.status_code == 503:
+                    logger.debug(f"[{site_name}] 503 - Cloudflare challenge or maintenance")
+                    return None
+                elif resp_inner.status_code != 200:
+                    logger.debug(f"[{site_name}] HTTP {resp_inner.status_code}")
+                    return None
+                
+                # Check for Cloudflare challenge page
+                content_sample_local = resp_inner.text[:500].lower() if resp_inner.text else ''
+                if 'checking your browser' in content_sample_local:
+                    logger.debug(f"[{site_name}] Cloudflare challenge detected")
+                    self._debug_dump_html(url, resp_inner.text, f"cloudflare_challenge_{site_name}")
+                    return None
+                return resp_inner
+
             # Use fresh session with rotating IP for heavy-security sites
             heavy_security = any(site in domain.lower() for site in ['ranobes', 'novelbin', 'lightnovelworld'])
             if heavy_security:
@@ -1230,28 +1300,14 @@ class Scraper:
             else:
                 session = self.session
             
-            headers = self._get_cloudflare_bypass_headers(url)
-            resp = session.get(url, headers=headers, timeout=timeout)
-            
-            if resp.status_code == 403:
-                logger.debug(f"[{site_name}] 403 Forbidden - likely Cloudflare blocked")
-                return None
-            elif resp.status_code == 503:
-                logger.debug(f"[{site_name}] 503 - Cloudflare challenge or maintenance")
-                return None
-            elif resp.status_code != 200:
-                logger.debug(f"[{site_name}] HTTP {resp.status_code}")
-                return None
-            
-            # Check for Cloudflare challenge page
-            content_sample = resp.text[:500].lower() if resp.text else ''
-            if 'checking your browser' in content_sample:
-                logger.debug(f"[{site_name}] Cloudflare challenge detected")
-                self._debug_dump_html(url, resp.text, f"cloudflare_challenge_{site_name}")
-                return None
-            
-            # Debug: log page structure info
-            if resp.text and self.debug_mode:
+            resp = fetch_once(session)
+
+            if not resp and rotate_on_fail:
+                alt_session = self._get_fresh_session(rotate_ip=True)
+                logger.debug(f"[{site_name}] Rotating proxy and retrying search fetch")
+                resp = fetch_once(alt_session)
+
+            if resp and resp.text and self.debug_mode:
                 soup_debug = BeautifulSoup(resp.text, 'html.parser')
                 title_tag = soup_debug.find('title')
                 page_title = title_tag.get_text()[:80] if title_tag else 'No title'
@@ -1301,7 +1357,7 @@ class Scraper:
             if 'ranobes' in url:
                 return self._get_ranobes_metadata(url)
 
-            resp = self._get_with_retry(url)
+            resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
             if not resp:
                 # Browser-based fallback for sites that block plain requests
                 if self.use_playwright and 'novelbin' in url:
@@ -1456,9 +1512,11 @@ class Scraper:
                 return None
 
             novel_id = match.group(1)
+            slug_match = re.search(r'/novels/\d+-([^./]+)', url)
+            slug = slug_match.group(1).lower() if slug_match else None
             base_chapters_url = f"https://ranobes.net/chapters/{novel_id}/"
 
-            resp = self._get_with_retry(base_chapters_url)
+            resp = self._get_with_retry(base_chapters_url, rotate_on_block=True, rotate_per_attempt=True)
             if not resp:
                 logger.warning(f"Failed to fetch chapters page for count")
                 return None
@@ -1514,7 +1572,7 @@ class Scraper:
                     logger.error(f"No __DATA__ script found anywhere on page")
                     # Fallback: try direct HTML parsing
                     logger.info("Attempting fallback HTML parsing for chapter count...")
-                    return self._count_ranobes_chapters_html_fallback(url)
+                    return self._count_ranobes_chapters_html_fallback(url, slug=slug)
             else:
                 logger.debug(f"Found script in content div")
 
@@ -1545,7 +1603,7 @@ class Scraper:
             logger.error(f"Error counting Ranobes chapters: {e}")
             return None
 
-    def _count_ranobes_chapters_html_fallback(self, url: str) -> Optional[int]:
+    def _count_ranobes_chapters_html_fallback(self, url: str, slug: Optional[str] = None) -> Optional[int]:
         """Fallback method to count chapters by scraping HTML directly"""
         try:
             # Extract novel ID
@@ -1554,9 +1612,12 @@ class Scraper:
                 return None
             
             novel_id = match.group(1)
+            if not slug:
+                slug_match = re.search(r'/novels/\d+-([^./]+)', url)
+                slug = slug_match.group(1).lower() if slug_match else None
             chapters_url = f"https://ranobes.net/chapters/{novel_id}/"
             
-            resp = self._get_with_retry(chapters_url)
+            resp = self._get_with_retry(chapters_url, rotate_on_block=True)
             if not resp:
                 return None
             
@@ -1566,13 +1627,18 @@ class Scraper:
             chapter_links = []
             
             # Try different selectors for chapter links
-            selectors = [
-                'a[href*="/the-way-of-restraint-"]',  # Novel-specific pattern
+            selectors = []
+            if slug:
+                selectors.extend([
+                    f'a[href*="/{slug}-"]',
+                    f'a[href*="/{slug}/"]'
+                ])
+            selectors.extend([
                 f'a[href*="-{novel_id}/"]',  # Novel ID pattern
                 'a[href*="/chapter"]',  # Generic chapter pattern
                 '.chapter-link',  # Class-based
                 '[data-chapter]'  # Data attribute
-            ]
+            ])
             
             for selector in selectors:
                 links = soup.select(selector)
@@ -1586,7 +1652,8 @@ class Scraper:
                 all_links = soup.find_all('a', href=True)
                 for link in all_links:
                     href = link.get('href')
-                    if href and (novel_id in href or 'restraint' in href.lower()):
+                    matches_slug = slug and slug in href.lower()
+                    if href and (novel_id in href or matches_slug):
                         chapter_links.append(href)
                 
                 logger.info(f"Fallback found {len(chapter_links)} potential chapter links")
@@ -1602,7 +1669,7 @@ class Scraper:
         try:
             logger.info(f"Fetching Ranobes metadata for {url}")
 
-            resp = self._get_with_retry(url)
+            resp = self._get_with_retry(url, rotate_on_block=True)
             if not resp:
                 return {
                     'title': 'Unknown',
@@ -1823,6 +1890,7 @@ class Scraper:
             metadata = metadata_result.get('metadata', {})
             total_available = metadata_result.get('total_chapters', 0)
 
+
             # 2. Collect chapter links
             if self.link_progress_callback:
                 self.link_progress_callback(0, 0, 'collecting')
@@ -1831,7 +1899,7 @@ class Scraper:
             if 'ranobes' in url:
                 chapter_links = self._get_ranobes_chapter_links(url)
             else:
-                resp = self._get_with_retry(url)
+                resp = self._get_with_retry(url, rotate_on_block=True)
                 if resp:
                     soup = BeautifulSoup(resp.content, 'html.parser')
                     chapter_links = self._get_chapter_links_from_html(
@@ -1866,9 +1934,15 @@ class Scraper:
             except Exception as e:
                 logger.warning(f"Sorting chapter links failed: {e}")
 
+            include_prologue = 'ranobes' in url and chapter_start == 1
+
             # Apply range
             start_idx = max(0, chapter_start - 1)
             end_idx = chapter_end if chapter_end else len(chapter_links)
+            # When starting from chapter 1 on Ranobes, pull one extra to include prologue
+            if include_prologue and chapter_end:
+                end_idx = min(len(chapter_links), end_idx + 1)
+
             target_links = chapter_links[start_idx:end_idx]
 
             if not target_links:
@@ -1971,6 +2045,15 @@ class Scraper:
 
             # Sort final chapters by number
             chapters.sort(key=lambda x: x.get('chapter_num', 0))
+
+            # Normalize ordering/titles and ensure prologue inclusion for Ranobes
+            chapters = self._normalize_chapters(
+                chapters,
+                include_prologue=include_prologue,
+                chapter_start=chapter_start,
+                chapter_end=chapter_end,
+                url=url,
+            )
             
             # Clear progress on success (or mark as complete with failures)
             if user_id and CACHE_AVAILABLE:
@@ -2013,6 +2096,69 @@ class Scraper:
                     pass
             return {'title': 'Unknown', 'chapters': [], 'error': str(e)}
 
+    def _normalize_chapters(self, chapters: List[Dict], include_prologue: bool, chapter_start: int, chapter_end: Optional[int], url: str) -> List[Dict]:
+        """Clean titles and enforce prologue + range semantics (Ranobes-focused)."""
+        if not chapters:
+            return chapters
+
+        is_ranobes = 'ranobes' in url
+
+        # Extract prologue if requested
+        prologue_chapter = None
+        remaining = list(chapters)
+        if include_prologue and remaining:
+            for ch in remaining:
+                title_raw = (ch.get('title') or '').lower()
+                if title_raw.startswith('prologue'):
+                    prologue_chapter = ch
+                    remaining = [c for c in remaining if c is not ch]
+                    break
+            if prologue_chapter is None:
+                prologue_chapter = remaining[0]
+                remaining = remaining[1:]
+
+        # Trim to requested count (main chapters only)
+        if chapter_end:
+            desired_main = chapter_end - chapter_start + 1
+            remaining = remaining[:desired_main]
+
+        def clean_title(raw: str) -> str:
+            if not raw:
+                return ''
+            # Drop novel suffix after '|'
+            return raw.split('|', 1)[0].strip()
+
+        normalized = []
+        main_start_num = 1 if include_prologue else chapter_start
+        for idx, ch in enumerate(remaining, start=main_start_num):
+            title_raw = ch.get('title') or ''
+            final_title = title_raw
+            if is_ranobes:
+                base = clean_title(title_raw)
+                if base.lower().startswith('chapter'):
+                    final_title = base
+                elif base:
+                    final_title = f"Chapter {idx} | {base}"
+                else:
+                    final_title = f"Chapter {idx}"
+            elif not title_raw:
+                final_title = f"Chapter {idx}"
+
+            ch_copy = dict(ch)
+            ch_copy['title'] = final_title
+            ch_copy['chapter_num'] = idx
+            normalized.append(ch_copy)
+
+        output = []
+        if prologue_chapter:
+            prologue_copy = dict(prologue_chapter)
+            prologue_copy['title'] = 'Prologue'
+            prologue_copy['chapter_num'] = 0
+            output.append(prologue_copy)
+
+        output.extend(normalized)
+        return output
+
     def _get_ranobes_chapter_links(self, url: str) -> List[str]:
         """Extract all chapter links for Ranobes using mathematical page calculation"""
         try:
@@ -2024,11 +2170,13 @@ class Scraper:
             if not match: return []
 
             novel_id = match.group(1)
+            slug_match = re.search(r'/novels/\d+-([^./]+)', url)
+            slug = slug_match.group(1).lower() if slug_match else None
             base_chapters_url = f"https://ranobes.net/chapters/{novel_id}/"
 
             # 2. Fetch Page 1 to get the Data
             logger.info(f"Fetching Page 1 data from {base_chapters_url}")
-            resp = self._get_with_retry(base_chapters_url)
+            resp = self._get_with_retry(base_chapters_url, rotate_on_block=True)
             if not resp: return []
 
             soup = BeautifulSoup(resp.content, 'html.parser')
@@ -2060,7 +2208,7 @@ class Scraper:
             # If no links found via JSON method, try HTML fallback
             if not all_links:
                 logger.info("No links from JSON method, trying HTML fallback...")
-                all_links = self._extract_ranobes_links_html_fallback(soup, novel_id)
+                all_links = self._extract_ranobes_links_html_fallback(soup, novel_id, slug)
 
             # If we couldn't read the page size, assume standard 10 or just use what we found
             if page_size == 0: page_size = max(len(all_links), 10)
@@ -2118,19 +2266,24 @@ class Scraper:
             logger.error(f"Error getting Ranobes links: {e}")
             return []
 
-    def _extract_ranobes_links_html_fallback(self, soup, novel_id: str) -> List[str]:
+    def _extract_ranobes_links_html_fallback(self, soup, novel_id: str, slug: Optional[str] = None) -> List[str]:
         """Fallback method to extract chapter links directly from HTML"""
         try:
             links = []
             
             # Try multiple selectors for chapter links
-            selectors = [
+            selectors = []
+            if slug:
+                selectors.extend([
+                    f'a[href*="/{slug}-"]',
+                    f'a[href*="/{slug}/"]'
+                ])
+            selectors.extend([
                 f'a[href*="-{novel_id}/"]',  # Links containing novel ID
-                'a[href*="/the-way-of-restraint-"]',  # Novel-specific pattern
                 'a[href*="/chapter"]',  # Generic chapter links
                 '.chapter-link a',  # Class-based
                 'a[data-chapter]'  # Data attribute
-            ]
+            ])
             
             for selector in selectors:
                 elements = soup.select(selector)
@@ -2155,8 +2308,9 @@ class Scraper:
                 for a in all_links:
                     href = a.get('href', '')
                     # Look for links that contain novel ID or novel name patterns
+                    matches_slug = slug and slug in href.lower()
                     if (novel_id in href or 
-                        'restraint' in href.lower() or
+                        matches_slug or
                         re.search(r'/\d+-\d+\.html$', href)):  # Chapter pattern
                         if href.startswith('/'):
                             href = f"https://ranobes.net{href}"
@@ -2177,47 +2331,53 @@ class Scraper:
 
     def _fetch_ranobes_page_links(self, url: str) -> List[str]:
         """Helper for worker threads to fetch a single page"""
-        resp = self._get_with_retry(url)
+        resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
         if not resp: return []
         soup = BeautifulSoup(resp.content, 'html.parser')
         return self._extract_ranobes_links_from_soup(soup)
 
     def _extract_ranobes_links_from_soup(self, soup) -> List[str]:
-        """Your original JSON extraction logic, moved to a helper function"""
+        """Extract chapter links from Ranobes page using __DATA__ JSON if present."""
         try:
             dle_content = soup.find("div", id="dle-content")
             if not dle_content:
                 # Try alternative selectors
                 dle_content = (soup.find("div", id="content") or  # New Ranobes structure
-                             soup.find("div", class_="dle-content") or 
-                             soup.find("main") or 
-                             soup.find("article") or
-                             soup.find("div", class_="content"))
+                               soup.find("div", class_="dle-content") or 
+                               soup.find("main") or 
+                               soup.find("article") or
+                               soup.find("div", class_="content"))
                 if not dle_content:
                     return []
 
-            script_tag = dle_content.find("script")
-            if not script_tag or not script_tag.string: 
-                # Debug: check if script is anywhere else
-                all_scripts = soup.find_all("script")
-                for script in all_scripts:
-                    if script.string and 'window.__DATA__' in script.string:
-                        script_tag = script
-                        logger.debug("Found __DATA__ script outside dle-content")
-                        break
-                
-                if not script_tag or not script_tag.string:
-                    return []
+            def iter_scripts(scope) -> List[str]:
+                texts = []
+                for s in scope.find_all("script"):
+                    # .string misses scripts with whitespace/children; get_text handles both
+                    txt = s.string or s.get_text() or ""
+                    if txt:
+                        texts.append(txt)
+                return texts
+
+            # Collect candidate script texts (container first, then full document)
+            script_texts = iter_scripts(dle_content)
+            if not script_texts:
+                script_texts = iter_scripts(soup)
+
+            target_json = None
+            for txt in script_texts:
+                match = re.search(r'window\.__DATA__\s*=\s*(\{.*?\})\s*;?', txt, re.DOTALL)
+                if match:
+                    target_json = match.group(1)
+                    break
+
+            if not target_json:
+                return []
 
             import json
-            json_match = re.search(r'window\.__DATA__\s*=\s*(\{.*\})',
-                                   script_tag.string, re.DOTALL)
-            if not json_match: return []
-
-            data = json.loads(json_match.group(1))
+            data = json.loads(target_json)
             chapters_data = data.get('chapters', [])
             
-            # Debug: log structure of data
             logger.debug(f"Ranobes JSON data keys: {list(data.keys())}")
             logger.debug(f"Ranobes chapters count in JSON: {len(chapters_data)}")
 
@@ -2275,7 +2435,15 @@ class Scraper:
                 except Exception:
                     referer = None
 
-            resp = self._get_with_retry(url, referer=referer)
+            rotate_ranobes = 'ranobes' in url
+            rotate_per_attempt = rotate_ranobes
+
+            resp = self._get_with_retry(
+                url,
+                referer=referer,
+                rotate_on_block=rotate_ranobes,
+                rotate_per_attempt=rotate_per_attempt,
+            )
             if not resp:
                 # Try browser-based fallback for NovelBin if enabled
                 if self.use_playwright and 'novelbin' in url:
@@ -2306,8 +2474,15 @@ class Scraper:
                     html_text = soup.prettify()
                 self._debug_dump_html(url, html_text, f"rate_limited_chapter_{chapter_num}")
                 time.sleep(10)  # Wait before retry
-                # Retry once with fresh session
-                resp = self._get_with_retry(url, referer=referer)
+                # Retry once with fresh session (force rotate per attempt for ranobes)
+                delay = random.uniform(20, 35) if rotate_ranobes else 10
+                time.sleep(delay)
+                resp = self._get_with_retry(
+                    url,
+                    referer=referer,
+                    rotate_on_block=rotate_ranobes,
+                    rotate_per_attempt=rotate_per_attempt,
+                )
                 if resp:
                     soup = BeautifulSoup(resp.content, 'html.parser')
                     page_text = soup.get_text()[:500].lower()
@@ -2385,11 +2560,29 @@ class Scraper:
             
             # --- NovelBuddy Specific ---
             elif 'novelbuddy' in url:
-                content_div = soup.select_one('.chapter__content, .content-inner, .viewer-content')
+                content_div = soup.select_one(
+                    '.chapter__content, .content-inner, .viewer-content, '
+                    '#chapter-content, .reading-content, .chapter-content'
+                )
                 if content_div:
-                    for junk in content_div.select('script, style, .ads, .navigation, .chapter-nav'):
+                    for junk in content_div.select(
+                        'script, style, .ads, .navigation, .chapter-nav, '
+                        '.chapter-title, .chapter__title, .player, .audio, audio, source, '
+                        '.tts, .text-to-speech, .voice, .video, .mejs-container, .chapter-player'
+                    ):
                         junk.decompose()
-                    content = content_div.get_text(separator='\n\n', strip=True)
+
+                    raw_text = content_div.get_text(separator='\n\n', strip=True)
+                    cleaned_lines = []
+                    for line in raw_text.splitlines():
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        lower = stripped.lower()
+                        if 'audio player' in lower or 'microsoft david' in lower or 'press reset' in lower:
+                            continue  # drop TTS/player helper text
+                        cleaned_lines.append(stripped)
+                    content = '\n\n'.join(cleaned_lines)
             
             # --- LNMTL Specific ---
             elif 'lnmtl' in url:
@@ -2434,9 +2627,79 @@ class Scraper:
                     f"[Chapter] Extracted content length for chapter {chapter_num} from {url}: {len(content)} chars"
                 )
 
-            # Extract Title
+            # Extract and clean title
             title_tag = soup.find('h1')
-            title = title_tag.get_text(strip=True) if title_tag else f"Chapter {chapter_num}"
+            title_raw = title_tag.get_text(strip=True) if title_tag else f"Chapter {chapter_num}"
+
+            # Remove novel name prefix if it matches the novel slug
+            novel_slug = None
+            novel_base_path = None
+            if novel_url:
+                slug_match = re.search(r'/novel/([^/?#]+)', novel_url)
+                if slug_match:
+                    novel_slug = slug_match.group(1).replace('-', ' ').lower()
+                    # Base path for slug-based sites like NovelBuddy
+                    parsed_novel = urlparse(novel_url)
+                    novel_base_path = f"/novel/{slug_match.group(1).lower()}"
+
+            title_match = re.search(r'(Chapter\s*\d+[^\n]*)', title_raw, re.IGNORECASE)
+            title_candidate = title_match.group(1).strip() if title_match else title_raw.strip()
+            if novel_slug and title_candidate.lower().startswith(novel_slug):
+                # Drop leading novel name
+                trimmed = title_candidate[len(novel_slug):].lstrip(' -:\u2013')
+                title_candidate = trimmed if trimmed else title_candidate
+            title = title_candidate
+
+            # Detect chapter number mismatches to avoid caching wrong chapters
+            expected_num = chapter_num
+            title_num = self._extract_chapter_number(title) if title else None
+            url_num = self._extract_chapter_number(url)
+            number_mismatch = False
+            if expected_num and title_num and title_num != expected_num:
+                number_mismatch = True
+            if expected_num and url_num and url_num != expected_num:
+                number_mismatch = True
+
+            # Slug/base-path mismatch guard for slugged sites (NovelBuddy)
+            slug_path_mismatch = False
+            if novel_base_path and 'novelbuddy' in url:
+                path_full = urlparse(url).path.lower()
+                if not path_full.startswith(novel_base_path):
+                    slug_path_mismatch = True
+            # Normalize content spacing and drop duplicate heading lines
+            if content:
+                content = content.replace('\xa0', ' ')
+                lines = content.splitlines()
+                normalized = []
+                for ln in lines:
+                    stripped = ln.strip()
+                    if stripped and title and stripped.lower() == title.lower():
+                        # Drop duplicated inline title lines
+                        continue
+                    if novel_slug and stripped.lower().startswith(novel_slug) and 'chapter' in stripped.lower():
+                        # Drop lines prefixed with novel name + chapter title
+                        continue
+                    normalized.append(stripped)
+
+                # Collapse multiple blank lines and remove leading indentation
+                cleaned_lines = []
+                for ln in normalized:
+                    if not ln:
+                        if cleaned_lines and cleaned_lines[-1] == '':
+                            continue
+                        cleaned_lines.append('')
+                    else:
+                        cleaned_lines.append(ln.lstrip())
+
+                content = '\n'.join(cleaned_lines)
+                content = re.sub(r'\n{3,}', '\n\n', content)
+
+            # If the numbers or slug path don't match, treat as suspect and do not cache (slugged sites)
+            if (number_mismatch or slug_path_mismatch) and 'novelbuddy' in url:
+                logger.warning(
+                    f"[Chapter] NovelBuddy mismatch: expected={expected_num}, title_num={title_num}, url_num={url_num}, slug_path_mismatch={slug_path_mismatch}; skipping cache and marking as failed"
+                )
+                return None
 
             chapter_data = {
                 'title': title,
@@ -2468,7 +2731,7 @@ class Scraper:
             logger.error(f"Error downloading chapter {url}: {e}")
             return None
 
-    def _get_with_retry(self, url: str, referer: Optional[str] = None, max_retries: int = None) -> Optional[requests.Response]:
+    def _get_with_retry(self, url: str, referer: Optional[str] = None, max_retries: int = None, rotate_per_attempt: bool = False, rotate_on_block: bool = False) -> Optional[requests.Response]:
         """Fetch URL with retries, rotating headers, and Cloudflare bypass attempts.
 
         Strategy:
@@ -2487,11 +2750,9 @@ class Scraper:
         
         # Use fresh session with IP rotation for heavy-security sites
         heavy_security = any(site in domain for site in ['ranobes', 'novelbin', 'lightnovelworld'])
+        base_session = self._get_fresh_session(rotate_ip=True) if heavy_security else self.session
         if heavy_security:
-            session = self._get_fresh_session(rotate_ip=True)
             logger.debug(f"[FETCH] Using fresh session + IP rotation for {domain}")
-        else:
-            session = self.session
         
         # Identify which site we're hitting
         site_key = None
@@ -2502,6 +2763,8 @@ class Scraper:
         
         logger.debug(f"[FETCH] Starting fetch for {url} (site: {site_key or 'unknown'})")
         
+        last_blocked = False
+
         for attempt in range(retries):
             try:
                 # Strategy 1: Normal headers (attempt 0)
@@ -2517,41 +2780,61 @@ class Scraper:
                 if referer:
                     headers['Referer'] = referer
                 
+                session = base_session
+                if rotate_per_attempt and heavy_security:
+                    session = self._get_fresh_session(rotate_ip=True)
+                elif rotate_on_block and heavy_security and last_blocked:
+                    session = self._get_fresh_session(rotate_ip=True)
+
                 resp = session.get(url, headers=headers, timeout=15, allow_redirects=True)
+                self._track_bandwidth(resp)
                 
                 # Log response details for debugging
                 logger.debug(f"[FETCH] Response: status={resp.status_code}, url={resp.url}, cookies={len(resp.cookies)}")
                 
+                blocked = False
                 if resp.status_code == 200:
-                    # Check for Cloudflare challenge page
-                    content_sample = resp.text[:500].lower() if resp.text else ''
-                    if 'checking your browser' in content_sample or 'cloudflare' in content_sample and 'challenge' in content_sample:
+                    # Check for Cloudflare challenge or bot page
+                    content_sample = resp.text[:800].lower() if resp.text else ''
+                    if 'checking your browser' in content_sample or ('cloudflare' in content_sample and 'challenge' in content_sample):
                         logger.warning(f"[CLOUDFLARE] Detected Cloudflare challenge on {url}")
-                        # Don't return - continue to next retry with different approach
+                        blocked = True
+                    elif 'dear visitor' in content_sample or 'abnormal activity' in content_sample:
+                        logger.warning(f"[FETCH] Bot block page detected on {url}")
+                        blocked = True
                     else:
                         logger.info(f"[FETCH] ✓ Success: {url}")
                         return resp
                 elif resp.status_code == 403:
                     logger.warning(f"[FETCH] Attempt {attempt + 1}: 403 Forbidden for {url}")
+                    blocked = True
                 elif resp.status_code == 503:
                     logger.warning(f"[FETCH] Attempt {attempt + 1}: 503 Service Unavailable (likely Cloudflare) for {url}")
+                    blocked = True
                 elif resp.status_code == 429:
                     logger.warning(f"[FETCH] Attempt {attempt + 1}: 429 Rate Limited for {url}")
+                    blocked = True
                     time.sleep(3)  # Longer delay for rate limiting
                 else:
                     logger.warning(f"[FETCH] Attempt {attempt + 1}: HTTP {resp.status_code} for {url}")
-                
+                    blocked = False
+
+                last_blocked = blocked
+
                 # Small delay before retry
                 time.sleep(1 + attempt * 0.5)
                 
             except requests.exceptions.Timeout:
                 logger.warning(f"[FETCH] Attempt {attempt + 1}: Timeout for {url}")
+                last_blocked = True
                 time.sleep(2)
             except requests.exceptions.ConnectionError as e:
                 logger.warning(f"[FETCH] Attempt {attempt + 1}: Connection error for {url}: {e}")
+                last_blocked = True
                 time.sleep(2)
             except Exception as e:
                 logger.warning(f"[FETCH] Attempt {attempt + 1}: Error for {url}: {type(e).__name__}: {e}")
+                last_blocked = True
                 time.sleep(1)
         
         # All retries failed - try alternative domain mirrors if available
@@ -2567,7 +2850,9 @@ class Scraper:
                 
                 try:
                     headers = self._get_cloudflare_bypass_headers(alt_url)
-                    resp = self.session.get(alt_url, headers=headers, timeout=15, allow_redirects=True)
+                    mirror_session = self._get_fresh_session(rotate_ip=True) if (rotate_per_attempt and heavy_security) else self.session
+                    resp = mirror_session.get(alt_url, headers=headers, timeout=15, allow_redirects=True)
+                    self._track_bandwidth(resp)
                     
                     if resp.status_code == 200:
                         content_sample = resp.text[:500].lower() if resp.text else ''
@@ -2895,8 +3180,10 @@ class Scraper:
         to common chapter list patterns.
         """
         links: List[str] = []
+        parsed_url = urlparse(url)
         base = url
-        domain = urlparse(url).netloc.lower()
+        domain = parsed_url.netloc.lower()
+        base_path = parsed_url.path.rstrip('/')
         
         logger.debug(f"[CHAPTERS] Extracting chapter links from {domain}")
 
@@ -2977,13 +3264,37 @@ class Scraper:
         
         # === NovelBuddy ===
         elif 'novelbuddy' in domain:
-            # NovelBuddy uses /chapter- pattern in URLs
-            for a in soup.find_all('a', href=True):
+            # NovelBuddy: restrict to the novel's own chapter list to avoid site-wide recent updates
+            slug_match = re.search(r'/novel/([^/?#]+)', url)
+            slug = slug_match.group(1).lower() if slug_match else None
+
+            chapter_containers = soup.select(
+                '#chapter-list, .chapter-list, .list-chapter, .chapters, '
+                '.chapter__list, #chapters, .list-chapter-book, .chapter-wrapper'
+            )
+
+            anchors = []
+            for cont in chapter_containers:
+                anchors.extend(cont.find_all('a', href=True))
+
+            # Fallback: only anchors containing /chapter- and (if available) the slug
+            if not anchors:
+                anchors = soup.select('a[href*="/chapter-"]')
+
+            for a in anchors:
                 href = a.get('href', '')
-                if '/chapter-' in href.lower():
-                    full = urljoin(base, href)
-                    if full not in links:
-                        links.append(full)
+                if '/chapter-' not in href.lower():
+                    continue
+                full = urljoin(base, href)
+                parsed_full = urlparse(full)
+                path_full = parsed_full.path.rstrip('/')
+                # Require path to start with the novel path (strong filter)
+                if base_path and not path_full.startswith(base_path):
+                    continue
+                if slug and slug not in path_full.lower():
+                    continue  # skip cross-novel links
+                if full not in links:
+                    links.append(full)
         
         # === LibRead ===
         elif 'libread' in domain:

@@ -187,17 +187,6 @@ def fetch_cover_image(title: str, source_url: str = None, metadata: dict = None)
     except Exception as e:
         logger.warning(f"NovelUpdates cover search failed: {e}")
     
-    # 3. Try Google Books API (free, no key required for basic search)
-    try:
-        # Use exact title match for better results - add "light novel" or "web novel" for accuracy
-        search_query = f'intitle:"{title}" light novel'
-        api_url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(search_query)}&maxResults=5"
-        resp = requests.get(api_url, timeout=10, headers=HEADERS)
-        if resp.status_code == 200:
-            data = resp.json()
-            items = data.get('items', [])
-            
-            # First pass: look for exact title match
             for item in items:
                 volume_info = item.get('volumeInfo', {})
                 book_title = volume_info.get('title', '').lower()
