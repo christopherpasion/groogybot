@@ -1617,7 +1617,7 @@ class Scraper:
                 slug = slug_match.group(1).lower() if slug_match else None
             chapters_url = f"https://ranobes.net/chapters/{novel_id}/"
             
-            resp = self._get_with_retry(chapters_url, rotate_on_block=True)
+            resp = self._get_with_retry(chapters_url, rotate_on_block=True, rotate_per_attempt=True)
             if not resp:
                 return None
             
@@ -1669,7 +1669,7 @@ class Scraper:
         try:
             logger.info(f"Fetching Ranobes metadata for {url}")
 
-            resp = self._get_with_retry(url, rotate_on_block=True)
+            resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
             if not resp:
                 return {
                     'title': 'Unknown',
