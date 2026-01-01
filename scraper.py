@@ -1542,61 +1542,59 @@ class Scraper:
                 else:
                     logger.info(f"Using alternative content container: {dle_content.name}.{dle_content.get('class', [])} #{dle_content.get('id', '')}")
 
-            script_tag = dle_content.find("script")
-            if not script_tag or not script_tag.string:
-                # Debug: check all scripts on the page
-                all_scripts = soup.find_all("script")
-                script_info = []
-                data_script = None
-                
-                for i, script in enumerate(all_scripts):
-                    if script.string:
-                        content_preview = script.string.strip()[:100].replace('\n', ' ')
-                        script_info.append(f"Script {i}: {content_preview}...")
-                        
-                        # Look for __DATA__ in any script
-                        if 'window.__DATA__' in script.string:
-                            data_script = script
-                            logger.info(f"Found __DATA__ script outside content div (Script {i})")
-                            break
-                    else:
-                        script_info.append(f"Script {i}: <empty>")
-                
-                logger.warning(f"No script in content div. Found {len(all_scripts)} total scripts:")
-                for info in script_info[:5]:  # Show first 5 scripts
-                    logger.warning(f"  {info}")
-                
-                if data_script:
-                    script_tag = data_script
-                else:
-                    logger.error(f"No __DATA__ script found anywhere on page")
-                    # Fallback: try direct HTML parsing
-                    logger.info("Attempting fallback HTML parsing for chapter count...")
-                    return self._count_ranobes_chapters_html_fallback(url, slug=slug)
-            else:
-                logger.debug(f"Found script in content div")
+            # Try to locate __DATA__ scripts anywhere on the page
+            script_tag = None
+            all_scripts = soup.find_all("script")
+            for i, script in enumerate(all_scripts):
+                txt = (script.string or script.get_text() or "").strip()
+                if not txt:
+                    continue
+                if 'window.__DATA__' in txt:
+                    script_tag = script
+                    break
 
-            # Extract JSON from window.__DATA__
-            import json
-            json_match = re.search(r'window\.__DATA__\s*=\s*(\{.*\})',
-                                   script_tag.string, re.DOTALL)
-            if not json_match:
-                logger.warning(f"No __DATA__ found in script")
-                return None
+            if script_tag:
+                import json
+                json_match = re.search(r'window\.__DATA__\s*=\s*(\{.*?\})',
+                                       script_tag.string or script_tag.get_text() or "",
+                                       re.DOTALL)
+                if json_match:
+                    try:
+                        data = json.loads(json_match.group(1))
+                        total_chapters = int(data.get('count_all', 0))
+                        if total_chapters > 0:
+                            logger.info(
+                                f"Ranobes: Got chapter count from JavaScript data: {total_chapters}"
+                            )
+                            return total_chapters
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"JSON parse error: {e}")
 
-            try:
-                data = json.loads(json_match.group(1))
-                total_chapters = data.get('count_all', 0)
-                if total_chapters > 0:
-                    logger.info(
-                        f"Ranobes: Got chapter count from JavaScript data: {total_chapters}"
-                    )
-                    return total_chapters
-            except json.JSONDecodeError as e:
-                logger.warning(f"JSON parse error: {e}")
+            # If no JSON count, fall back to HTML link parsing (chapters page then novel page)
+            links = self._extract_ranobes_links_from_soup(soup)
+            if not links:
+                html_links = self._extract_ranobes_links_html_fallback(soup, novel_id, slug)
+                if html_links:
+                    links.extend(html_links)
+            if not links:
+                latest = self._extract_ranobes_latest_block(soup, base_chapters_url)
+                if latest:
+                    links.extend(latest)
+
+            if not links:
+                novel_resp = self._get_with_retry(url, rotate_on_block=True, rotate_per_attempt=True)
+                if novel_resp:
+                    novel_soup = BeautifulSoup(novel_resp.content, 'html.parser')
+                    links = self._extract_ranobes_latest_block(novel_soup, url)
+                    if not links:
+                        links = self._extract_ranobes_links_html_fallback(novel_soup, novel_id, slug)
+
+            if links:
+                logger.info(f"Ranobes: Chapter count derived from HTML links: {len(links)}")
+                return len(list(dict.fromkeys(links)))
 
             logger.warning(
-                "Ranobes: Could not determine chapter count from JavaScript data"
+                "Ranobes: Could not determine chapter count from JavaScript or HTML"
             )
             return None
         except Exception as e:
