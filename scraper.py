@@ -1428,7 +1428,8 @@ class Scraper:
                 logger.warning(f"No div#dle-content found. Available div IDs: {div_ids}")
                 
                 # Try alternative selectors
-                dle_content = (soup.find("div", class_="dle-content") or 
+                dle_content = (soup.find("div", id="content") or  # New Ranobes structure
+                             soup.find("div", class_="dle-content") or 
                              soup.find("main") or 
                              soup.find("article") or
                              soup.find("div", class_="content"))
@@ -2000,7 +2001,8 @@ class Scraper:
             dle_content = soup.find("div", id="dle-content")
             if not dle_content:
                 # Try alternative selectors
-                dle_content = (soup.find("div", class_="dle-content") or 
+                dle_content = (soup.find("div", id="content") or  # New Ranobes structure
+                             soup.find("div", class_="dle-content") or 
                              soup.find("main") or 
                              soup.find("article") or
                              soup.find("div", class_="content"))
