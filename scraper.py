@@ -2176,7 +2176,11 @@ class Scraper:
 
             # 2. Fetch Page 1 to get the Data
             logger.info(f"Fetching Page 1 data from {base_chapters_url}")
-            resp = self._get_with_retry(base_chapters_url, rotate_on_block=True)
+            resp = self._get_with_retry(
+                base_chapters_url,
+                rotate_on_block=True,
+                rotate_per_attempt=True,
+            )
             if not resp: return []
 
             soup = BeautifulSoup(resp.content, 'html.parser')
@@ -2209,6 +2213,28 @@ class Scraper:
             if not all_links:
                 logger.info("No links from JSON method, trying HTML fallback...")
                 all_links = self._extract_ranobes_links_html_fallback(soup, novel_id, slug)
+
+            # Try parsing the inline latest-chapters block (e.g., the novel page's "Last 25 chapters")
+            if not all_links:
+                latest = self._extract_ranobes_latest_block(soup, base_chapters_url)
+                if latest:
+                    logger.info(f"Ranobes latest-chapters block yielded {len(latest)} links")
+                    all_links.extend(latest)
+
+            # As a final attempt, pull the novel page itself and parse its latest-chapters block
+            if not all_links:
+                logger.info("Ranobes: Trying novel page latest-chapters block")
+                novel_resp = self._get_with_retry(
+                    url,
+                    rotate_on_block=True,
+                    rotate_per_attempt=True,
+                )
+                if novel_resp:
+                    novel_soup = BeautifulSoup(novel_resp.content, 'html.parser')
+                    latest = self._extract_ranobes_latest_block(novel_soup, url)
+                    if latest:
+                        logger.info(f"Ranobes novel page latest-chapters block yielded {len(latest)} links")
+                        all_links.extend(latest)
 
             # If we couldn't read the page size, assume standard 10 or just use what we found
             if page_size == 0: page_size = max(len(all_links), 10)
@@ -2353,6 +2379,29 @@ class Scraper:
             
         except Exception as e:
             logger.error(f"HTML fallback extraction error: {e}")
+            return []
+
+    def _extract_ranobes_latest_block(self, soup, base_url: str) -> List[str]:
+        """Parse the inline "Last chapters" block Ranobes renders on novel pages."""
+        try:
+            anchors = soup.select(
+                'div.r-fullstory-chapters ul.chapters-scroll-list a.chapter-item[rel="chapter"], '
+                'div.r-fullstory-chapters ul.chapters-scroll-list a.chapter-item'
+            )
+            if not anchors:
+                anchors = soup.select('a.chapter-item[rel="chapter"], .chapters-scroll-list a[rel="chapter"]')
+
+            links: List[str] = []
+            for a in anchors:
+                href = a.get('href')
+                if not href:
+                    continue
+                links.append(urljoin(base_url, href))
+
+            # Deduplicate while preserving order
+            return list(dict.fromkeys(links))
+        except Exception as e:
+            logger.debug(f"Ranobes latest block parse error: {e}")
             return []
 
     def _fetch_ranobes_page_links(self, url: str) -> List[str]:
