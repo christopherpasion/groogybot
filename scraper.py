@@ -2922,7 +2922,29 @@ class Scraper:
                 if content_div:
                     for tag in content_div.select('.ads, .nav-buttons, .bookmark, .report, div[align="center"]'):
                         tag.decompose()
+                    
+                    # Extract content preserving italics/emphasis
+                    # Convert <em>, <i> to markdown-style *text* for EPUB
+                    for em_tag in content_div.find_all(['em', 'i']):
+                        em_text = em_tag.get_text()
+                        em_tag.replace_with(f'*{em_text}*')
+                    
                     raw_content = content_div.get_text(separator='\n\n', strip=True)
+                    
+                    # Remove Ranobes watermarks (various Unicode obfuscated versions)
+                    # Pattern matches: ŖᴀNÕḂĒŚ, RANOBES, ᖇᗩᑎOᗷᗴᔕ, etc.
+                    watermark_patterns = [
+                        r'ŖᴀNÕḂĒŚ',
+                        r'RANOBES',
+                        r'Ranobes',
+                        r'ranobes',
+                        r'ᖇᗩᑎOᗷᗴᔕ',
+                        r'[ŖR][ᴀAa][NÑ][OÕ][BḂ][EĒ][SŚ]',  # Mixed Unicode variants
+                        r'R\s*A\s*N\s*O\s*B\s*E\s*S',  # Spaced out
+                    ]
+                    for pattern in watermark_patterns:
+                        raw_content = re.sub(pattern, '', raw_content, flags=re.IGNORECASE)
+                    
                     lines = raw_content.split('\n')
                     cleaned_lines = []
                     for line in lines:

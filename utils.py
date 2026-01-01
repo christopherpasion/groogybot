@@ -882,8 +882,18 @@ def create_epub(novel_data, user_id: str = None, user_tier: str = 'verified',
             if not para:
                 continue
             
-            # Escape HTML entities
-            para_escaped = para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            # Convert *text* to <em>text</em> for italics (before HTML escaping)
+            # This handles italics marked during scraping
+            para_with_italics = re.sub(r'\*([^*]+)\*', r'<em>\1</em>', para)
+            
+            # Escape HTML entities (but preserve our <em> tags)
+            # First escape the text parts, then restore <em> tags
+            para_escaped = para_with_italics.replace('&', '&amp;')
+            # Temporarily protect <em> tags
+            para_escaped = para_escaped.replace('<em>', '|||EM_OPEN|||').replace('</em>', '|||EM_CLOSE|||')
+            para_escaped = para_escaped.replace('<', '&lt;').replace('>', '&gt;')
+            # Restore <em> tags
+            para_escaped = para_escaped.replace('|||EM_OPEN|||', '<em>').replace('|||EM_CLOSE|||', '</em>')
             
             # Detect paragraph type and apply appropriate class
             if para.startswith('---') or para == '***' or para == '* * *' or para == '---':
