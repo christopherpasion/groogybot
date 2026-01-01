@@ -186,11 +186,17 @@ def fetch_cover_image(title: str, source_url: str = None, metadata: dict = None)
                             return compressed, media_type or content_type
     except Exception as e:
         logger.warning(f"NovelUpdates cover search failed: {e}")
-    
+
+    # 3. Try Google Books API (exact/fuzzy title match only; no loose fallback to avoid wrong covers)
+    try:
+        gb_url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(title)}"
+        resp = requests.get(gb_url, timeout=10, headers=HEADERS)
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data.get('items', []) or []
             for item in items:
                 volume_info = item.get('volumeInfo', {})
                 book_title = volume_info.get('title', '').lower()
-                # Check if the book title contains our search title (fuzzy match)
                 if title.lower() in book_title or book_title in title.lower():
                     image_links = volume_info.get('imageLinks', {})
                     for size in ['extraLarge', 'large', 'medium', 'thumbnail', 'smallThumbnail']:
@@ -204,9 +210,6 @@ def fetch_cover_image(title: str, source_url: str = None, metadata: dict = None)
                                 logger.info(f"Got cover from Google Books (exact match): {img_url}")
                                 _write_cover_cache(title, compressed, media_type or content_type)
                                 return compressed, media_type or content_type
-            
-            # Second pass: take first result if no exact match (fallback - but skip unrelated books)
-            # Don't use fallback to avoid wrong covers like "Human Language" for "Lord of Mysteries"
     except Exception as e:
         logger.warning(f"Google Books cover search failed: {e}")
     
