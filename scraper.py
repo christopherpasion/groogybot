@@ -1468,7 +1468,9 @@ class Scraper:
                     script_tag = data_script
                 else:
                     logger.error(f"No __DATA__ script found anywhere on page")
-                    return None
+                    # Fallback: try direct HTML parsing
+                    logger.info("Attempting fallback HTML parsing for chapter count...")
+                    return self._count_ranobes_chapters_html_fallback(url)
             else:
                 logger.debug(f"Found script in content div")
 
@@ -1497,6 +1499,58 @@ class Scraper:
             return None
         except Exception as e:
             logger.error(f"Error counting Ranobes chapters: {e}")
+            return None
+
+    def _count_ranobes_chapters_html_fallback(self, url: str) -> Optional[int]:
+        """Fallback method to count chapters by scraping HTML directly"""
+        try:
+            # Extract novel ID
+            match = re.search(r'/novels/(\d+)', url)
+            if not match:
+                return None
+            
+            novel_id = match.group(1)
+            chapters_url = f"https://ranobes.net/chapters/{novel_id}/"
+            
+            resp = self._get_with_retry(chapters_url)
+            if not resp:
+                return None
+            
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # Look for chapter links in common patterns
+            chapter_links = []
+            
+            # Try different selectors for chapter links
+            selectors = [
+                'a[href*="/the-way-of-restraint-"]',  # Novel-specific pattern
+                f'a[href*="-{novel_id}/"]',  # Novel ID pattern
+                'a[href*="/chapter"]',  # Generic chapter pattern
+                '.chapter-link',  # Class-based
+                '[data-chapter]'  # Data attribute
+            ]
+            
+            for selector in selectors:
+                links = soup.select(selector)
+                if links:
+                    chapter_links = [a.get('href') for a in links if a.get('href')]
+                    logger.info(f"Found {len(chapter_links)} chapter links using selector: {selector}")
+                    break
+            
+            if not chapter_links:
+                # Last resort: look for any links containing the novel name/ID
+                all_links = soup.find_all('a', href=True)
+                for link in all_links:
+                    href = link.get('href')
+                    if href and (novel_id in href or 'restraint' in href.lower()):
+                        chapter_links.append(href)
+                
+                logger.info(f"Fallback found {len(chapter_links)} potential chapter links")
+            
+            return len(chapter_links) if chapter_links else None
+            
+        except Exception as e:
+            logger.error(f"HTML fallback error: {e}")
             return None
 
     def _get_ranobes_metadata(self, url: str) -> Dict:
@@ -1958,6 +2012,11 @@ class Scraper:
 
             # 4. Get links from Page 1
             all_links = self._extract_ranobes_links_from_soup(soup)
+            
+            # If no links found via JSON method, try HTML fallback
+            if not all_links:
+                logger.info("No links from JSON method, trying HTML fallback...")
+                all_links = self._extract_ranobes_links_html_fallback(soup, novel_id)
 
             # If we couldn't read the page size, assume standard 10 or just use what we found
             if page_size == 0: page_size = max(len(all_links), 10)
@@ -2013,6 +2072,63 @@ class Scraper:
 
         except Exception as e:
             logger.error(f"Error getting Ranobes links: {e}")
+            return []
+
+    def _extract_ranobes_links_html_fallback(self, soup, novel_id: str) -> List[str]:
+        """Fallback method to extract chapter links directly from HTML"""
+        try:
+            links = []
+            
+            # Try multiple selectors for chapter links
+            selectors = [
+                f'a[href*="-{novel_id}/"]',  # Links containing novel ID
+                'a[href*="/the-way-of-restraint-"]',  # Novel-specific pattern
+                'a[href*="/chapter"]',  # Generic chapter links
+                '.chapter-link a',  # Class-based
+                'a[data-chapter]'  # Data attribute
+            ]
+            
+            for selector in selectors:
+                elements = soup.select(selector)
+                if elements:
+                    chapter_links = [a.get('href') for a in elements if a.get('href')]
+                    # Filter for full URLs
+                    full_links = []
+                    for link in chapter_links:
+                        if link.startswith('http'):
+                            full_links.append(link)
+                        elif link.startswith('/'):
+                            full_links.append(f"https://ranobes.net{link}")
+                    
+                    if full_links:
+                        logger.info(f"HTML fallback found {len(full_links)} links using: {selector}")
+                        links.extend(full_links)
+                        break
+            
+            if not links:
+                # Last resort: search all links for patterns
+                all_links = soup.find_all('a', href=True)
+                for a in all_links:
+                    href = a.get('href', '')
+                    # Look for links that contain novel ID or novel name patterns
+                    if (novel_id in href or 
+                        'restraint' in href.lower() or
+                        re.search(r'/\d+-\d+\.html$', href)):  # Chapter pattern
+                        if href.startswith('/'):
+                            href = f"https://ranobes.net{href}"
+                        elif href.startswith('http'):
+                            pass  # Already full URL
+                        else:
+                            continue
+                        links.append(href)
+                
+                if links:
+                    logger.info(f"HTML fallback last resort found {len(links)} potential chapter links")
+            
+            return list(dict.fromkeys(links))  # Remove duplicates
+            
+        except Exception as e:
+            logger.error(f"HTML fallback extraction error: {e}")
             return []
 
     def _fetch_ranobes_page_links(self, url: str) -> List[str]:
