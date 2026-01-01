@@ -2385,6 +2385,19 @@ Use `\\n` for new lines when using /edit command."""
             else:
                 self.scraper.parallel_workers = WORKERS_NORMAL  # 5
 
+            # Cap workers for sites with heavy anti-bot protection
+            # These sites rate-limit aggressively regardless of tier
+            HEAVY_SECURITY_SITES = ['ranobes.net', 'ranobes.com', 'novelbin', 'lightnovelworld']
+            MAX_WORKERS_HEAVY_SECURITY = 3
+            
+            for site in HEAVY_SECURITY_SITES:
+                if site in url.lower():
+                    original_workers = self.scraper.parallel_workers
+                    self.scraper.parallel_workers = min(self.scraper.parallel_workers, MAX_WORKERS_HEAVY_SECURITY)
+                    if original_workers > MAX_WORKERS_HEAVY_SECURITY:
+                        logger.info(f"[Workers] Capped from {original_workers} to {MAX_WORKERS_HEAVY_SECURITY} for {site}")
+                    break
+
             chapter_range_str = f"{chapter_start}-{chapter_end}" if chapter_end else f"{chapter_start}-ALL"
             status_msg = await message.channel.send(f"⏳ Collecting links...")
 
