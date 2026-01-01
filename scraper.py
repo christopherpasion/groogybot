@@ -1539,6 +1539,8 @@ class Scraper:
             
             if html_content:
                 soup = BeautifulSoup(html_content, 'html.parser')
+                # Log first 500 chars to see what we're getting
+                logger.info(f"[RANOBES] HTML preview: {html_content[:500]}...")
             else:
                 soup = BeautifulSoup(resp.content, 'html.parser')
             dle_content = soup.find("div", id="dle-content")
