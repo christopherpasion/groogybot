@@ -59,7 +59,7 @@ def is_protected_site(url: str) -> bool:
             if domain == site or domain.endswith('.' + site):
                 return True
         return False
-    except:
+    except Exception:
         return False
 
 
@@ -3463,7 +3463,7 @@ class Scraper:
                 return int(match.group(1))
 
             return 999999  # If no number found, push to end of list
-        except:
+        except Exception:
             return 999999
 
     def _get_random_headers(self, for_site: str = None) -> Dict[str, str]:

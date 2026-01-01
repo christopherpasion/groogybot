@@ -4,33 +4,29 @@ import os
 import asyncio
 import re
 import logging
-from urllib.parse import urlparse
-
-# Configure logging early for opus loading
-logging.basicConfig(level=logging.INFO)
-
-
-# Load opus library for voice support with comprehensive search
-from dotenv import load_dotenv
-import os
-
-load_dotenv()  # Loads variables from .env
-
-# Access environment variables
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-DISCORD_SERVER_ID = os.getenv("DISCORD_SERVER_ID")
 import time
 import math
-import requests
-from scraper import Scraper, is_protected_site
-from utils import create_epub, create_pdf, upload_large_file, is_file_too_large_for_discord
-from user_settings import settings_manager, get_user_settings, get_setting, set_setting, get_style_css, get_settings_display, EPUB_STYLES
-from download_history import history_manager, add_download, get_history, get_last_download, get_library, check_duplicate, get_stats
+from urllib.parse import urlparse
 from typing import Optional, Dict, Tuple
+
+from dotenv import load_dotenv
+import requests
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Access environment variables
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+DISCORD_SERVER_ID = os.getenv("DISCORD_SERVER_ID")
+
+from scraper import Scraper, is_protected_site
+from utils import create_epub, create_pdf, upload_large_file, is_file_too_large_for_discord
+from user_settings import settings_manager, get_user_settings, get_setting, set_setting, get_style_css, get_settings_display, EPUB_STYLES
+from download_history import history_manager, add_download, get_history, get_last_download, get_library, check_duplicate, get_stats
 
 # API endpoint for analytics/dashboard (set your API URL or leave empty to disable)
 API_BASE_URL = os.environ.get('API_BASE_URL', '')
@@ -190,14 +186,14 @@ SUPPORTER_ROLE_NAME = "Supporter"  # Alias for Sponsor (same tier)
 ADMIN_ROLE_NAME = "admin"
 
 # Private chat category ID - reactions only work in this category
-PRIVATE_CHAT_CATEGORY_ID = 1452964350233936103
+PRIVATE_CHAT_CATEGORY_ID = int(os.getenv('PRIVATE_CHAT_CATEGORY_ID', '1452964350233936103'))
 # Channel where Cat Café welcome message is posted
-CAT_CAFE_CHANNEL_ID = 1452964413379313685
+CAT_CAFE_CHANNEL_ID = int(os.getenv('CAT_CAFE_CHANNEL_ID', '1452964413379313685'))
 # Channel where bot logs are posted
-LOGS_CHANNEL_ID = 1452975292590063667
+LOGS_CHANNEL_ID = int(os.getenv('LOGS_CHANNEL_ID', '1452975292590063667'))
 # Verification message for role assignment
-VERIFICATION_MESSAGE_ID = 1453054196520718376
-VERIFICATION_CHANNEL_ID = 1452902693784780891
+VERIFICATION_MESSAGE_ID = int(os.getenv('VERIFICATION_MESSAGE_ID', '1453054196520718376'))
+VERIFICATION_CHANNEL_ID = int(os.getenv('VERIFICATION_CHANNEL_ID', '1452902693784780891'))
 
 # Small hint for back/cancel options (shown at bottom of interactive messages)
 HINT_TEXT = "\n\n`back` - go back | `cancel` - cancel"
@@ -1966,6 +1962,12 @@ Use `\\n` for new lines when using /edit command."""
         except Exception as e:
             logger.error(f"Error checking for updates: {e}")
             await message.channel.send(f"❌ Failed to check for updates: {e}")
+
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
+        """Clean up temporary_channels when a channel is deleted"""
+        if channel.id in self.temporary_channels:
+            del self.temporary_channels[channel.id]
+            logger.info(f"Cleaned up deleted temporary channel: {channel.id}")
 
     async def on_raw_reaction_add(self,
                                   payload: discord.RawReactionActionEvent):

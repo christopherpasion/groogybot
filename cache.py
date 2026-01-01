@@ -163,7 +163,7 @@ class NovelCache:
             return None
     
     def set_chapter(self, chapter_url: str, content: Dict, novel_url: str = None):
-        """Cache chapter content."""
+        """Cache chapter content with atomic write to prevent corruption."""
         if novel_url:
             novel_hash = self._url_hash(novel_url)
             chapter_dir = self.chapters_dir / novel_hash
@@ -172,14 +172,31 @@ class NovelCache:
         else:
             cache_file = self.chapters_dir / f"{self._url_hash(chapter_url)}.json"
         
+        temp_path = None
         try:
             content['_cached_at'] = time.time()
             content['_url'] = chapter_url
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(content, f, ensure_ascii=False, indent=2)
+            
+            # Use atomic write pattern: write to temp file, then rename
+            import tempfile
+            with tempfile.NamedTemporaryFile('w', dir=cache_file.parent, 
+                                             delete=False, suffix='.tmp',
+                                             encoding='utf-8') as tmp:
+                json.dump(content, tmp, ensure_ascii=False, indent=2)
+                temp_path = tmp.name
+            
+            # Atomic rename (on POSIX) or replace (on Windows)
+            os.replace(temp_path, cache_file)
+            temp_path = None  # Prevent cleanup on success
             logger.debug(f"[Cache] Saved chapter {chapter_url[:50]}")
         except Exception as e:
             logger.warning(f"[Cache] Failed to save chapter: {e}")
+            # Clean up temp file if it exists
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
     
     # === Utility Methods ===
     
