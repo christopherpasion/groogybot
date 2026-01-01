@@ -1995,8 +1995,13 @@ class Scraper:
                 cache = get_cache()
                 cached = cache.get_chapter(url, novel_url)
                 if cached:
-                    logger.debug(f"[Chapter] Using cached chapter {chapter_num}")
-                    return cached
+                    # Validate cached content is not rate-limited junk
+                    cached_content = cached.get('content', '')
+                    if cached_content and len(cached_content) > 200 and 'Rate limited' not in cached_content:
+                        logger.info(f"[Chapter] ✓ Cache hit for chapter {chapter_num}")
+                        return cached
+                    else:
+                        logger.info(f"[Chapter] Ignoring bad cached content for chapter {chapter_num}")
             
             logger.info(
                 f"[Chapter] Starting download for chapter {chapter_num} from {url}"
@@ -2166,10 +2171,17 @@ class Scraper:
                 'url': url
             }
             
-            # Cache the chapter content (it doesn't change)
-            if CACHE_AVAILABLE and content:
-                cache = get_cache()
-                cache.set_chapter(url, chapter_data, novel_url)
+            # Cache the chapter content ONLY if it's valid (not rate-limited or too short)
+            # Short content (<200 chars) is likely anti-bot message
+            if CACHE_AVAILABLE and content and len(content) > 200:
+                if 'Rate limited' not in content and 'abnormal activity' not in content.lower():
+                    cache = get_cache()
+                    cache.set_chapter(url, chapter_data, novel_url)
+                    logger.debug(f"[Chapter] Cached chapter {chapter_num} ({len(content)} chars)")
+                else:
+                    logger.warning(f"[Chapter] Not caching rate-limited content for chapter {chapter_num}")
+            elif content and len(content) <= 200:
+                logger.warning(f"[Chapter] Not caching short content ({len(content)} chars) for chapter {chapter_num} - likely anti-bot")
             
             return chapter_data
         except Exception as e:
