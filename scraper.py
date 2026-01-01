@@ -2065,8 +2065,14 @@ class Scraper:
                     'status': 'in_progress'
                 })
             
+            # Reduce parallelism for Ranobes to avoid Cloudflare rate limits
+            chapter_workers = self.parallel_workers
+            if 'ranobes' in url:
+                chapter_workers = 1  # Sequential for Ranobes
+                logger.info(f"[Ranobes] Using sequential chapter downloads to avoid rate limits")
+            
             with ThreadPoolExecutor(
-                    max_workers=self.parallel_workers) as executor:
+                    max_workers=chapter_workers) as executor:
                 future_to_url = {
                     executor.submit(self._download_chapter, link_url, i + chapter_start + len(completed_urls), url):
                     link_url
@@ -2355,25 +2361,48 @@ class Scraper:
             if max_page <= 1 and all_links:
                 return all_links
 
-            # 6. Parallel Fetch Pages 2 to Max (requests-based)
-            page_urls = [
-                f"https://ranobes.net/chapters/{novel_id}/page/{p}/"
-                for p in range(2, max_page + 1)
-            ]
-            logger.info(
-                f"Parallel fetching {len(page_urls)} additional pages...")
-
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                future_to_url = {
-                    executor.submit(self._fetch_ranobes_page_links, u): u
-                    for u in page_urls
-                }
-                for future in as_completed(future_to_url):
-                    try:
-                        links = future.result()
-                        if links: all_links.extend(links)
-                    except:
-                        pass
+            # 6. Sequential Fetch Pages 2 to Max with delays to avoid rate limiting
+            import time, random
+            failed_pages = []
+            logger.info(f"Fetching {max_page - 1} additional pages sequentially with delays...")
+            
+            for p in range(2, max_page + 1):
+                page_url = f"https://ranobes.net/chapters/{novel_id}/page/{p}/"
+                # Add random delay between requests to avoid Cloudflare
+                delay = random.uniform(1.0, 2.5)
+                time.sleep(delay)
+                
+                links = self._fetch_ranobes_page_links(page_url)
+                if links:
+                    all_links.extend(links)
+                    logger.info(f"[Ranobes] Page {p}/{max_page}: Got {len(links)} links")
+                else:
+                    failed_pages.append(page_url)
+                    logger.warning(f"[Ranobes] Page {p}/{max_page}: Failed to fetch")
+            
+            # Try Playwright for failed pages
+            if failed_pages and self.use_playwright:
+                logger.info(f"[Ranobes] Retrying {len(failed_pages)} failed pages with Playwright...")
+                try:
+                    from playwright_scraper import get_scraper_instance, run_in_pw_loop
+                    pw_scraper = get_scraper_instance()
+                    for page_url in failed_pages:
+                        delay = random.uniform(2.0, 4.0)
+                        time.sleep(delay)
+                        try:
+                            html, _ = run_in_pw_loop(pw_scraper.get_page_content(page_url))
+                            if html and 'Cloudflare' not in html:
+                                soup = BeautifulSoup(html, 'html.parser')
+                                links = self._extract_ranobes_links_from_soup(soup)
+                                if not links:
+                                    links = self._extract_ranobes_links_html_fallback(soup, novel_id, slug)
+                                if links:
+                                    all_links.extend(links)
+                                    logger.info(f"[Playwright] Recovered {len(links)} links from {page_url}")
+                        except Exception as e:
+                            logger.warning(f"[Playwright] Failed to fetch {page_url}: {e}")
+                except Exception as e:
+                    logger.warning(f"[Playwright] Fallback initialization failed: {e}")
 
             logger.info(f"Total chapters collected: {len(all_links)}")
 
@@ -2677,15 +2706,22 @@ class Scraper:
                 rotate_per_attempt=rotate_per_attempt,
             )
             if not resp:
-                # Try browser-based fallback for NovelBin if enabled
-                if self.use_playwright and 'novelbin' in url:
-                    html = self._browser_fetch_html(url)
-                    if not html:
-                        logger.warning(
-                            f"[Chapter] Failed to fetch chapter URL after retries: {url}"
-                        )
+                # Try browser-based fallback for protected sites if enabled
+                if self.use_playwright and ('novelbin' in url or 'ranobes' in url):
+                    logger.info(f"[Chapter] Trying Playwright fallback for chapter {chapter_num}")
+                    try:
+                        from playwright_scraper import get_scraper_instance, run_in_pw_loop
+                        pw_scraper = get_scraper_instance()
+                        html, _ = run_in_pw_loop(pw_scraper.get_page_content(url))
+                        if html and 'Cloudflare' not in html and 'checking your browser' not in html.lower():
+                            soup = BeautifulSoup(html, 'html.parser')
+                            logger.info(f"[Playwright] Successfully fetched chapter {chapter_num}")
+                        else:
+                            logger.warning(f"[Chapter] Playwright also blocked for chapter {chapter_num}")
+                            return None
+                    except Exception as e:
+                        logger.warning(f"[Playwright] Failed to fetch chapter {chapter_num}: {e}")
                         return None
-                    soup = BeautifulSoup(html, 'html.parser')
                 else:
                     logger.warning(
                         f"[Chapter] Failed to fetch chapter URL after retries: {url}"
