@@ -27,9 +27,12 @@ services:
       - SHRINKEARN_API_KEY=${SHRINKEARN_API_KEY:-}
       - PROXY_URL=${PROXY_URL:-}
       - FLARESOLVERR_URL=http://flaresolverr:8191/v1
+      - PROXY_LIST_PATH=/app/proxies.txt
     volumes:
       # Persist cookies between restarts
       - ./cookies.json:/app/cookies.json
+      # Mount proxy list for rotation
+      - ./proxies.txt:/app/proxies.txt
     # Memory limit (optional, adjust as needed)
     mem_limit: 2g
     # Logging
@@ -38,3 +41,4 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # ...existing code...
